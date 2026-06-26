@@ -42,9 +42,6 @@ public class Lod extends DataObject
 
     public static int width = 64;
 
-    // The generation-step and world-compression-type blocks are the same constant bytes for every
-    // LOD, so their compressed form is identical too. Compress them once and reuse the result to
-    // avoid running the (allocation-heavy) LZMA2 encoder for them on every single LOD.
     protected static volatile byte[] compressedGenerationStep;
 
     protected static volatile byte[] compressedWorldCompressionType;
@@ -174,11 +171,6 @@ public class Lod extends DataObject
         try {
             LZMA2Options options = new LZMA2Options(3);
 
-            // The preset's multi-MiB dictionary dwarfs our small payloads, yet the LZMA2 encoder
-            // allocates match-finder structures proportional to it on every call. Sizing the
-            // dictionary to the data cuts per-call allocation by orders of magnitude without
-            // changing the compression result (the window only needs to cover the input), which
-            // keeps heap allocation pressure (and committed heap) from spiking under load.
             options.setDictSize(Math.max(LZMA2Options.DICT_SIZE_MIN, Math.min(uncompressedData.length, 1 << 20)));
 
             OutputStream compressorStream = new XZOutputStream(compressedStream, options, XZ.CHECK_CRC64);
