@@ -452,17 +452,20 @@ public class DhSupport implements Configurable
                     world.getMaterialAt(chunkX, world.getSeaLevel(), chunkZ);
                 });
 
-                // Discard the chunks we loaded.
-                this.getScheduler().runOnRegionThread(worldId, worldX, worldZ, () -> {
-                    for (long packed : loads.keySet()) {
-                        world.discardChunk(
-                            Coordinates.unpackX(packed),
-                            Coordinates.unpackZ(packed)
-                        );
-                    }
+                // Discard the chunks we loaded, unless we already did so above after rejecting the load.
+                // (In the rejected case dummy mode is active, so this would be a no-op anyway.)
+                if (!loadRejected) {
+                    this.getScheduler().runOnRegionThread(worldId, worldX, worldZ, () -> {
+                        for (long packed : loads.keySet()) {
+                            world.discardChunk(
+                                Coordinates.unpackX(packed),
+                                Coordinates.unpackZ(packed)
+                            );
+                        }
 
-                    return null;
-                });
+                        return null;
+                    });
+                }
 
                 // No LOD was found. Start building a new one.
                 CompletableFuture<Lod> lodFuture = this.queueBuilder(worldId, position, this.getBuilder(world, position));
