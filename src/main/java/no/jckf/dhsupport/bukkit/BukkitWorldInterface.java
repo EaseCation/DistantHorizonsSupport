@@ -34,6 +34,7 @@ import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.util.*;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.logging.Logger;
 
 public class BukkitWorldInterface implements WorldInterface
@@ -42,7 +43,8 @@ public class BukkitWorldInterface implements WorldInterface
 
     protected static boolean ASYNC_LOAD_WARNING_SENT = false;
 
-    protected static EnumMap<Material, MaterialRecord> MATERIAL_CACHE = new EnumMap<>(Material.class);
+    // Keyed by world ID, since the material mapping depends on that world's configuration.
+    protected static final Map<UUID, Map<Material, MaterialRecord>> MATERIAL_CACHE = new ConcurrentHashMap<>();
 
     protected DhSupportBukkitPlugin plugin;
 
@@ -573,7 +575,9 @@ public class BukkitWorldInterface implements WorldInterface
 
     public MaterialRecord getMaterialRecordAt(int x, int y, int z)
     {
-        return MATERIAL_CACHE.computeIfAbsent(
+        Map<Material, MaterialRecord> worldMaterialCache = MATERIAL_CACHE.computeIfAbsent(this.world.getUID(), (id) -> new ConcurrentHashMap<>());
+
+        return worldMaterialCache.computeIfAbsent(
             this.getChunk(x, z).getBlockType(Coordinates.blockToChunkRelative(x), y, Coordinates.blockToChunkRelative(z)),
             (mat) -> {
                 String key = Utils.unNamespaceKey(mat.getKey().toString());
