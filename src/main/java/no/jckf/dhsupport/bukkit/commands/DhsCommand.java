@@ -147,7 +147,7 @@ public class DhsCommand implements CommandExecutor, TabCompleter
             return true;
         }
 
-        Configuration config = this.plugin.getDhSupport().getPlayerConfiguration(player.getUniqueId(), player.getWorld().getUID());
+        Configuration config = this.plugin.getDhSupport().getPlayerConfiguration(player.getUniqueId());
 
         if (config == null) {
             sender.sendMessage(ChatColor.YELLOW + "The player " + ChatColor.WHITE + player.getName() + ChatColor.YELLOW + " is not using Distant Horizons.");

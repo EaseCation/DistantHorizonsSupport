@@ -87,7 +87,7 @@ public class DhSupport implements Configurable
 
     protected Map<String, LodModel> touchedLods = new ConcurrentHashMap<>();
 
-    protected Map<UUID, Map<UUID, Configuration>> playerConfigurations = new HashMap<>();
+    protected Map<UUID, Configuration> playerConfigurations = new HashMap<>();
 
     protected Map<UUID, PreGenerator> preGenerators = new HashMap<>();
 
@@ -220,11 +220,6 @@ public class DhSupport implements Configurable
         this.worldInterfaces.put(id, worldInterface);
     }
 
-    public Map<UUID, WorldInterface> getWorldInterfaces()
-    {
-        return this.worldInterfaces;
-    }
-
     @Nullable
     public WorldInterface getWorldInterface(UUID id)
     {
@@ -307,21 +302,19 @@ public class DhSupport implements Configurable
         this.warning("A newer version of the plugin is available.");
     }
 
-    public Map<UUID, Map<UUID, Configuration>> getPlayerConfigurations()
+    public Map<UUID, Configuration> getPlayerConfigurations()
     {
         return this.playerConfigurations;
     }
 
-    public void setPlayerConfiguration(UUID playerId, Map<UUID, Configuration> playerConfigurations)
+    public void setPlayerConfiguration(UUID playerId, Configuration playerConfiguration)
     {
-        this.playerConfigurations.put(playerId, playerConfigurations);
+        this.playerConfigurations.put(playerId, playerConfiguration);
     }
 
-    public Configuration getPlayerConfiguration(UUID playerId, UUID worldId)
+    public Configuration getPlayerConfiguration(UUID playerId)
     {
-        Map<UUID, Configuration> configurations = this.playerConfigurations.get(playerId);
-
-        return configurations == null ? null : configurations.get(worldId);
+        return this.playerConfigurations.get(playerId);
     }
 
     public void clearPlayerConfiguration(UUID playerId)
@@ -405,7 +398,7 @@ public class DhSupport implements Configurable
 
         WorldInterface world = this.getWorldInterface(worldId).newInstance();
 
-        boolean generateNewChunks = world.getConfig().getBool(DhsConfig.GENERATE_NEW_CHUNKS, true) && world.isInsideWorldBorder(worldX, worldZ, Lod.width);
+        boolean generateNewChunks = world.getConfig().getBool(DhsConfig.GENERATE_NEW_CHUNKS, true);
 
         Map<Long, CompletableFuture<Boolean>> loads = new HashMap<>();
 
@@ -570,7 +563,7 @@ public class DhSupport implements Configurable
 
                                 // TODO: Don't use Bukkit classes.
                                 for (Player player : Bukkit.getWorld(newLodModel.getWorldId()).getPlayers()) {
-                                    Configuration playerConfig = this.getPlayerConfiguration(player.getUniqueId(), world.getId());
+                                    Configuration playerConfig = this.getPlayerConfiguration(player.getUniqueId());
 
                                     // No config for this player? Probably not using DH.
                                     if (playerConfig == null) {

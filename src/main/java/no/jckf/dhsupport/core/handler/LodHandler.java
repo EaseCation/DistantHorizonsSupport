@@ -18,6 +18,7 @@
 
 package no.jckf.dhsupport.core.handler;
 
+import no.jckf.dhsupport.core.Coordinates;
 import no.jckf.dhsupport.core.DhSupport;
 import no.jckf.dhsupport.core.configuration.Configuration;
 import no.jckf.dhsupport.core.configuration.DhsConfig;
@@ -59,15 +60,13 @@ public class LodHandler
                 return;
             }
 
-            Configuration dhsConfig = this.dhSupport.getConfig();
-
             // TODO: Some sort of Player wrapper or interface object. Bukkit classes should not be imported here.
-            UUID worldUuid = Bukkit.getWorld(requestMessage.getWorldName().substring(dhsConfig.getString(DhsConfig.LEVEL_KEY_PREFIX, "").length())).getUID();
+            UUID worldUuid = Bukkit.getPlayer(requestMessage.getSender()).getWorld().getUID();
 
             WorldInterface world = this.dhSupport.getWorldInterface(worldUuid);
 
             Configuration config = world.getConfig();
-            Configuration playerConfig = this.dhSupport.getPlayerConfiguration(requestMessage.getSender(), worldUuid);
+            Configuration playerConfig = this.dhSupport.getPlayerConfiguration(requestMessage.getSender());
 
             if (!config.getBool(DhsConfig.DISTANT_GENERATION_ENABLED) || !playerConfig.getBool(DhsConfig.DISTANT_GENERATION_ENABLED)) {
                 ExceptionMessage exceptionMessage = new ExceptionMessage();
@@ -99,6 +98,50 @@ public class LodHandler
                 this.pluginMessageHandler.sendPluginMessage(requestMessage.getSender(), exceptionMessage);
                 return;
             }
+
+            int worldX = Coordinates.sectionToBlock(position.getX());
+            int worldZ = Coordinates.sectionToBlock(position.getZ());
+
+            Integer borderCenterX = world.getWorldBorderX();
+            Integer borderCenterZ = world.getWorldBorderZ();
+            Integer borderRadius = world.getWorldBorderRadius();
+
+            if (borderCenterX != null && borderCenterZ != null && borderRadius != null) {
+                int minX = borderCenterX - borderRadius;
+                int maxX = borderCenterX + borderRadius;
+
+                int minZ = borderCenterZ - borderRadius;
+                int maxZ = borderCenterZ + borderRadius;
+
+                int higherLodX = worldX + 64;
+                int higherLodZ = worldZ + 64;
+
+                if (higherLodX < minX || worldX > maxX || higherLodZ < minZ || worldZ > maxZ) {
+                    ExceptionMessage exceptionMessage = new ExceptionMessage();
+                    exceptionMessage.isResponseTo(requestMessage);
+                    exceptionMessage.setTypeId(ExceptionMessage.TYPE_REQUEST_REJECTED);
+                    exceptionMessage.setMessage("World border");
+                    this.pluginMessageHandler.sendPluginMessage(requestMessage.getSender(), exceptionMessage);
+                    return;
+                }
+            }
+
+            /*boolean generate = config.getBool(DhsConfig.GENERATE_NEW_CHUNKS);
+
+            if (!generate) {
+                for (int relativeChunkX = 0; relativeChunkX < Lod.width / 16; relativeChunkX++) {
+                    for (int relativeChunkZ = 0; relativeChunkZ < Lod.width / 16; relativeChunkZ++) {
+                        if (!world.chunkExists(worldX + relativeChunkX * 16, worldZ + relativeChunkZ * 16)) {
+                            ExceptionMessage exceptionMessage = new ExceptionMessage();
+                            exceptionMessage.isResponseTo(requestMessage);
+                            exceptionMessage.setTypeId(ExceptionMessage.TYPE_REQUEST_REJECTED);
+                            exceptionMessage.setMessage("Fog of war");
+                            this.pluginMessageHandler.sendPluginMessage(requestMessage.getSender(), exceptionMessage);
+                            return;
+                        }
+                    }
+                }
+            }*/
 
             this.dhSupport.getLod(worldUuid, position)
                 .thenAccept((lodModel) -> {
