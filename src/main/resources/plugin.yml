@@ -10,7 +10,3 @@ commands:
     description: Manage DH Support.
     usage: /dhs
     permission: distant_horizons.admin
-  dh:
-    description: Not used.
-    usage: /dh
-    permission: distant_horizons.admin

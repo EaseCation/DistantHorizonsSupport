@@ -30,14 +30,19 @@ import org.bukkit.World;
 import org.bukkit.command.Command;
 import org.bukkit.command.CommandExecutor;
 import org.bukkit.command.CommandSender;
+import org.bukkit.command.TabCompleter;
 import org.bukkit.entity.Player;
 import org.jetbrains.annotations.NotNull;
+import org.jetbrains.annotations.Nullable;
 
 import java.time.Duration;
 import java.util.Arrays;
+import java.util.Collections;
+import java.util.List;
 import java.util.UUID;
+import java.util.stream.Collectors;
 
-public class DhsCommand implements CommandExecutor
+public class DhsCommand implements CommandExecutor, TabCompleter
 {
     protected DhSupportBukkitPlugin plugin;
 
@@ -537,5 +542,116 @@ public class DhsCommand implements CommandExecutor
         sender.sendMessage(ChatColor.RED + "Unknown action.");
 
         return true;
+    }
+
+    @Override
+    public @Nullable List<String> onTabComplete(@NotNull CommandSender sender, @NotNull Command command, @NotNull String alias, @NotNull String[] args)
+    {
+        if (args.length == 0) {
+            return Collections.emptyList();
+        }
+
+        List<String> baseCommands = Arrays.asList("status", "reload", "worlds", "pregen", "pause", "unpause", "trim", "bench", "config");
+
+        if (args.length == 1) {
+            return filterStartingWith(baseCommands, args[0]);
+        }
+
+        String subCommand = args[0].toLowerCase();
+
+        switch (subCommand) {
+            case "status":
+                if (args.length == 2) {
+                    return filterStartingWith(
+                            plugin.getServer().getOnlinePlayers().stream().map(Player::getName).collect(Collectors.toList()),
+                            args[1]
+                    );
+                }
+                break;
+
+            case "pregen":
+                if (args.length == 2) {
+                    return filterStartingWith(Arrays.asList("start", "stop", "status"), args[1]);
+                }
+
+                if (args.length == 3) {
+                    return filterStartingWith(
+                            plugin.getServer().getWorlds().stream().map(World::getName).collect(Collectors.toList()),
+                            args[2]
+                    );
+                }
+                break;
+
+            case "trim":
+            case "bench":
+                if (args.length == 2) {
+                    return filterStartingWith(
+                            plugin.getServer().getWorlds().stream().map(World::getName).collect(Collectors.toList()),
+                            args[1]
+                    );
+                }
+                break;
+
+            case "config":
+                if (args.length == 2) {
+                    return filterStartingWith(Arrays.asList("set", "get", "unset"), args[1]);
+                }
+
+                if (args.length == 3) {
+                    return filterStartingWith(getConfigKeys(), args[2]);
+                }
+                break;
+            default:
+                break;
+        }
+
+        return Collections.emptyList();
+    }
+
+    private List<String> filterStartingWith(List<String> options, String prefix)
+    {
+        if (prefix == null || prefix.isEmpty()) {
+            return options;
+        }
+        return options.stream()
+                .filter(s -> s.toLowerCase().startsWith(prefix.toLowerCase()))
+                .collect(Collectors.toList());
+    }
+
+    private List<String> getConfigKeys()
+    {
+        return Arrays.asList(
+                DhsConfig.RENDER_DISTANCE,
+                DhsConfig.DISTANT_GENERATION_ENABLED,
+                DhsConfig.FULL_DATA_REQUEST_CONCURRENCY_LIMIT,
+                DhsConfig.REAL_TIME_UPDATES_ENABLED,
+                DhsConfig.REAL_TIME_UPDATE_RADIUS,
+                DhsConfig.LOGIN_DATA_SYNC_ENABLED,
+                DhsConfig.LOGIN_DATA_SYNC_RADIUS,
+                DhsConfig.LOGIN_DATA_SYNC_RC_LIMIT,
+                DhsConfig.MAX_DATA_TRANSFER_SPEED,
+                DhsConfig.BORDER_CENTER_X,
+                DhsConfig.BORDER_CENTER_Z,
+                DhsConfig.BORDER_RADIUS,
+                DhsConfig.USE_VANILLA_WORLD_BORDER,
+                DhsConfig.VANILLA_WORLD_BORDER_EXPANSION,
+                DhsConfig.LOD_REFRESH_INTERVAL,
+                DhsConfig.GENERATE_NEW_CHUNKS,
+                DhsConfig.GENERATE_NEW_CHUNKS_WARNING,
+                DhsConfig.BUILDER_TYPE,
+                DhsConfig.TRUST_HEIGHT_MAP,
+                DhsConfig.BUILDER_RESOLUTION,
+                DhsConfig.SCAN_TO_SEA_LEVEL,
+                DhsConfig.FAST_UNDERFILL,
+                DhsConfig.INCLUDE_NON_COLLIDING_TOP_LAYER,
+                DhsConfig.PERFORM_UNDERGLOW_HACK,
+                DhsConfig.SAMPLE_BIOMES_3D,
+                DhsConfig.UPDATE_EVENTS,
+                DhsConfig.ENABLE_DH_COMMAND_HELP_TEXT,
+                DhsConfig.DUMMY_CHUNK,
+                DhsConfig.MATERIAL_MAP,
+                DhsConfig.AD_MESSAGE,
+                DhsConfig.LIGHT_OFFSET_HACK
+        );
     }
 }
