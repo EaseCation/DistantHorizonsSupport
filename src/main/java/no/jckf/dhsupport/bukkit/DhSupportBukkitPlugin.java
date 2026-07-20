@@ -25,6 +25,9 @@ import no.jckf.dhsupport.bukkit.handler.PlayerHandler;
 import no.jckf.dhsupport.bukkit.handler.PluginMessageProxy;
 import no.jckf.dhsupport.bukkit.handler.WorldHandler;
 import no.jckf.dhsupport.core.DhSupport;
+import no.jckf.dhsupport.core.world.WorldInterface;
+import net.easecation.dhsupport.api.DhSupportRuntimeApi;
+import net.easecation.dhsupport.api.DhWorldRegistration;
 import no.jckf.dhsupport.core.configuration.Configuration;
 import no.jckf.dhsupport.core.configuration.DhsConfig;
 import org.bstats.bukkit.Metrics;
@@ -34,6 +37,7 @@ import org.bukkit.Server;
 import org.bukkit.World;
 import org.bukkit.configuration.file.YamlConfiguration;
 import org.bukkit.plugin.java.JavaPlugin;
+import org.bukkit.plugin.ServicePriority;
 
 import javax.annotation.Nullable;
 import java.io.InputStreamReader;
@@ -51,6 +55,8 @@ public class DhSupportBukkitPlugin extends JavaPlugin
     protected PluginMessageProxy pluginMessageProxy;
 
     protected BukkitScheduler scheduler;
+
+    protected BukkitDhSupportRuntimeApi runtimeApi;
 
     @Override
     public void onEnable()
@@ -108,6 +114,14 @@ public class DhSupportBukkitPlugin extends JavaPlugin
         this.getServer().getPluginManager().registerEvents(new WorldHandler(this), this);
         this.getServer().getPluginManager().registerEvents(new PlayerHandler(this), this);
 
+        this.runtimeApi = new BukkitDhSupportRuntimeApi(this);
+        this.getServer().getServicesManager().register(
+            DhSupportRuntimeApi.class,
+            this.runtimeApi,
+            this,
+            ServicePriority.Normal
+        );
+
         this.getCommand("dhs").setExecutor(new DhsCommand(this));
         this.getCommand("dh").setExecutor(new DhCommand(this));
 
@@ -117,6 +131,9 @@ public class DhSupportBukkitPlugin extends JavaPlugin
     @Override
     public void onDisable()
     {
+        this.getServer().getServicesManager().unregisterAll(this);
+        this.runtimeApi = null;
+
         if (this.metrics != null) {
             this.metrics.shutdown();
         }
@@ -183,5 +200,29 @@ public class DhSupportBukkitPlugin extends JavaPlugin
     public DhSupport getDhSupport()
     {
         return this.dhSupport;
+    }
+
+    public synchronized DhWorldRegistration ensureWorldRegistered(World world)
+    {
+        if (this.dhSupport == null) {
+            throw new IllegalStateException("DH Support is not enabled");
+        }
+
+        WorldInterface existing = this.dhSupport.getWorldInterface(world.getUID());
+        if (existing != null) {
+            if (!existing.getName().equals(world.getName())) {
+                throw new IllegalStateException(
+                    "World UUID " + world.getUID() + " is already registered as " + existing.getName()
+                );
+            }
+            return new DhWorldRegistration(world.getUID(), world.getName(), false);
+        }
+
+        BukkitWorldInterface worldInterface = new BukkitWorldInterface(this, world, this.dhSupport.getConfig());
+        worldInterface.setLogger(this.dhSupport.getLogger());
+        worldInterface.doUnsafeThings();
+        this.dhSupport.setWorldInterface(world.getUID(), worldInterface);
+        this.getLogger().info("Registered DH world interface for " + world.getName() + " (" + world.getUID() + ")");
+        return new DhWorldRegistration(world.getUID(), world.getName(), true);
     }
 }

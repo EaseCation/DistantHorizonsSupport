@@ -18,33 +18,45 @@
 
 package no.jckf.dhsupport.core.database.repositories;
 
+import net.easecation.dhsupport.api.DhExportRequest;
+import net.easecation.dhsupport.api.DhExportResult;
+import net.easecation.dhsupport.api.DhImportMode;
+import net.easecation.dhsupport.api.DhImportResult;
 import no.jckf.dhsupport.core.database.Database;
 import no.jckf.dhsupport.core.database.models.LodModel;
 
+import java.nio.file.Path;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.Executor;
+import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
-import java.util.function.Supplier;
+import java.util.concurrent.TimeUnit;
 
 public class AsyncLodRepository extends LodRepository
 {
-    protected Executor executor = Executors.newSingleThreadExecutor();
+    protected ExecutorService executor = Executors.newSingleThreadExecutor((task) -> {
+        Thread thread = new Thread(task, "DHSupport-LodRepository");
+        thread.setDaemon(true);
+        return thread;
+    });
 
-    public AsyncLodRepository(Database database)
+    protected LodArtifactRepository artifactRepository;
+
+    public AsyncLodRepository(Database database, String pluginVersion)
     {
         super(database);
+        this.artifactRepository = new LodArtifactRepository(database, pluginVersion);
     }
 
-    protected <T> CompletableFuture<T> queueTask(Supplier<T> task)
+    protected <T> CompletableFuture<T> queueTask(CheckedSupplier<T> task)
     {
         CompletableFuture<T> future = new CompletableFuture<>();
 
         this.executor.execute(() -> {
             try {
                 future.complete(task.get());
-            } catch (Exception exception) {
-                future.completeExceptionally(exception);
+            } catch (Throwable error) {
+                future.completeExceptionally(error);
             }
         });
 
@@ -74,5 +86,49 @@ public class AsyncLodRepository extends LodRepository
     public CompletableFuture<Integer> trimLodsAsync(UUID worldId, int lowSectionX, int lowSectionZ, int highSectionX, int highSectionZ)
     {
         return this.queueTask(() -> this.trimLods(worldId, lowSectionX,lowSectionZ, highSectionX, highSectionZ));
+    }
+
+    public CompletableFuture<DhExportResult> exportWorldLodsAsync(UUID worldId, DhExportRequest request)
+    {
+        return this.queueTask(() -> this.artifactRepository.exportWorld(worldId, request));
+    }
+
+    public CompletableFuture<DhImportResult> importWorldLodsAsync(UUID worldId, Path artifact, DhImportMode mode)
+    {
+        return this.queueTask(() -> this.artifactRepository.importWorld(worldId, artifact, mode));
+    }
+
+    public CompletableFuture<Long> countWorldLodsAsync(UUID worldId)
+    {
+        return this.queueTask(() -> this.countWorldLods(worldId));
+    }
+
+    public CompletableFuture<Long> deleteWorldLodsAsync(UUID worldId)
+    {
+        return this.queueTask(() -> this.deleteWorldLods(worldId));
+    }
+
+    public CompletableFuture<Void> awaitIdle()
+    {
+        return this.queueTask(() -> null);
+    }
+
+    public void shutdown()
+    {
+        this.executor.shutdown();
+        try {
+            if (!this.executor.awaitTermination(10, TimeUnit.SECONDS)) {
+                this.executor.shutdownNow();
+            }
+        } catch (InterruptedException exception) {
+            this.executor.shutdownNow();
+            Thread.currentThread().interrupt();
+        }
+    }
+
+    @FunctionalInterface
+    protected interface CheckedSupplier<T>
+    {
+        T get() throws Exception;
     }
 }

@@ -39,6 +39,10 @@ public class LodRepository
 
     protected static final String SQL_TRIM_LODS = "DELETE FROM lods WHERE worldId = ? AND (x < ? OR z < ? OR x > ? OR z > ?)";
 
+    protected static final String SQL_COUNT_WORLD_LODS = "SELECT COUNT(*) FROM lods WHERE worldId = ?";
+
+    protected static final String SQL_DELETE_WORLD_LODS = "DELETE FROM lods WHERE worldId = ?";
+
     protected Database database;
 
     protected Logger logger;
@@ -56,6 +60,35 @@ public class LodRepository
     public Logger getLogger()
     {
         return this.logger;
+    }
+
+    public long countWorldLods(UUID worldId)
+    {
+        try {
+            PreparedStatement statement = this.database.prepareAndReuse(SQL_COUNT_WORLD_LODS);
+            statement.setString(1, worldId.toString());
+            try (ResultSet result = statement.executeQuery()) {
+                if (!result.next()) {
+                    throw new SQLException("LOD count query returned no row");
+                }
+                return result.getLong(1);
+            }
+        } catch (SQLException exception) {
+            this.database.clearQueryCache();
+            throw new RuntimeException("Could not count world LODs", exception);
+        }
+    }
+
+    public long deleteWorldLods(UUID worldId)
+    {
+        try {
+            PreparedStatement statement = this.database.prepareAndReuse(SQL_DELETE_WORLD_LODS);
+            statement.setString(1, worldId.toString());
+            return statement.executeUpdate();
+        } catch (SQLException exception) {
+            this.database.clearQueryCache();
+            throw new RuntimeException("Could not delete world LODs", exception);
+        }
     }
 
     public LodModel saveLod(UUID worldId, int sectionX, int sectionZ, byte[] data, byte[] beacons, int version)

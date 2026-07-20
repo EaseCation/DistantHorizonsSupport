@@ -25,6 +25,7 @@ import no.jckf.dhsupport.core.configuration.DhsConfig;
 import no.jckf.dhsupport.core.database.Database;
 import no.jckf.dhsupport.core.database.migrations.AddLodVersionColumn;
 import no.jckf.dhsupport.core.database.migrations.CreateLodsTable;
+import no.jckf.dhsupport.core.database.migrations.CreateImportedLodArtifactsTable;
 import no.jckf.dhsupport.core.database.migrations.DeleteLodsWithoutVersion;
 import no.jckf.dhsupport.core.database.models.LodModel;
 import no.jckf.dhsupport.core.database.repositories.AsyncLodRepository;
@@ -49,6 +50,7 @@ import java.util.*;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutionException;
+import java.util.concurrent.TimeUnit;
 import java.util.function.Predicate;
 import java.util.logging.Logger;
 
@@ -77,7 +79,7 @@ public class DhSupport implements Configurable
 
     protected PerformanceTracker generationTracker = new PerformanceTracker();
 
-    protected Map<UUID, WorldInterface> worldInterfaces = new HashMap<>();
+    protected Map<UUID, WorldInterface> worldInterfaces = new ConcurrentHashMap<>();
 
     protected PluginMessageHandler pluginMessageHandler;
 
@@ -89,7 +91,7 @@ public class DhSupport implements Configurable
 
     protected Map<UUID, Configuration> playerConfigurations = new HashMap<>();
 
-    protected Map<UUID, PreGenerator> preGenerators = new HashMap<>();
+    protected Map<UUID, PreGenerator> preGenerators = new ConcurrentHashMap<>();
 
     public DhSupport(String pluginVersion, String gameVersion)
     {
@@ -99,7 +101,7 @@ public class DhSupport implements Configurable
         this.configuration = new Configuration();
 
         this.database = new Database();
-        this.lodRepository = new AsyncLodRepository(this.database);
+        this.lodRepository = new AsyncLodRepository(this.database, pluginVersion);
 
         this.pluginMessageHandler = new PluginMessageHandler(this);
 
@@ -119,6 +121,7 @@ public class DhSupport implements Configurable
             this.database.addMigration(CreateLodsTable.class);
             this.database.addMigration(AddLodVersionColumn.class);
             this.database.addMigration(DeleteLodsWithoutVersion.class);
+            this.database.addMigration(CreateImportedLodArtifactsTable.class);
 
             this.database.migrate();
         } catch (Exception exception) {
@@ -145,8 +148,23 @@ public class DhSupport implements Configurable
 
     public void onDisable()
     {
+        this.preGenerators.values().forEach(PreGenerator::stop);
+
         if (this.pluginMessageHandler != null) {
             this.pluginMessageHandler.onDisable();
+        }
+
+        try {
+            this.awaitIdle().orTimeout(10, TimeUnit.SECONDS).join();
+        } catch (Exception exception) {
+            this.warning("Timed out while waiting for LOD work to stop: " + exception.getMessage());
+        }
+
+        this.lodRepository.shutdown();
+        try {
+            this.database.close();
+        } catch (Exception exception) {
+            this.warning("Could not close LOD database cleanly: " + exception.getMessage());
         }
     }
 
@@ -393,12 +411,30 @@ public class DhSupport implements Configurable
 
     protected CompletableFuture<LodModel> generateLod(UUID worldId, SectionPosition position, boolean manageChunks)
     {
+        return this.generateLod(worldId, position, manageChunks, null);
+    }
+
+    protected CompletableFuture<LodModel> generateLod(
+        UUID worldId,
+        SectionPosition position,
+        boolean manageChunks,
+        @Nullable Boolean generateNewChunksOverride
+    )
+    {
         int worldX = Coordinates.sectionToBlock(position.getX());
         int worldZ = Coordinates.sectionToBlock(position.getZ());
 
-        WorldInterface world = this.getWorldInterface(worldId).newInstance();
+        WorldInterface registeredWorld = this.getWorldInterface(worldId);
+        if (registeredWorld == null) {
+            return CompletableFuture.failedFuture(
+                new IllegalStateException("No DH world interface is registered for " + worldId)
+            );
+        }
+        WorldInterface world = registeredWorld.newInstance();
 
-        boolean generateNewChunks = world.getConfig().getBool(DhsConfig.GENERATE_NEW_CHUNKS, true);
+        boolean generateNewChunks = generateNewChunksOverride != null
+            ? generateNewChunksOverride
+            : world.getConfig().getBool(DhsConfig.GENERATE_NEW_CHUNKS, true);
 
         Map<Long, CompletableFuture<Boolean>> loads = new HashMap<>();
 
@@ -453,7 +489,13 @@ public class DhSupport implements Configurable
                 });
 
                 // No LOD was found. Start building a new one.
-                CompletableFuture<Lod> lodFuture = this.queueBuilder(worldId, position, this.getBuilder(world, position));
+                LodBuilder builder = this.getBuilder(world, position);
+                if (builder == null) {
+                    return CompletableFuture.<LodModel>failedFuture(
+                        new IllegalStateException("No LOD builder is available for world " + world.getName())
+                    );
+                }
+                CompletableFuture<Lod> lodFuture = this.queueBuilder(worldId, position, builder);
 
                 // Combine the LOD and beacons and save the result in the database.
                 return lodFuture.thenApply((lod) -> {
@@ -480,6 +522,12 @@ public class DhSupport implements Configurable
 
     public void touchLod(UUID worldId, int x, int z, @Nullable String reason)
     {
+        WorldInterface world = this.getWorldInterface(worldId);
+        if (world == null) {
+            this.warning("Ignoring LOD touch for unregistered world " + worldId + " at " + x + " " + z);
+            return;
+        }
+
         int sectionX = Coordinates.blockToSection(x);
         int sectionZ = Coordinates.blockToSection(z);
 
@@ -494,7 +542,7 @@ public class DhSupport implements Configurable
             return;
         }
 
-        this.debug("Touched LOD at " + this.getWorldInterface(worldId).getName() + " " + x + " " + z + (reason == null ? "." : ": " + reason));
+        this.debug("Touched LOD at " + world.getName() + " " + x + " " + z + (reason == null ? "." : ": " + reason));
 
         this.touchedLods.put(key, lodModel);
     }
@@ -515,6 +563,11 @@ public class DhSupport implements Configurable
             this.touchedLods.remove(key);
 
             WorldInterface world = this.getWorldInterface(lodModelToDelete.getWorldId());
+
+            if (world == null) {
+                this.warning("Discarding touched LOD for unregistered world " + lodModelToDelete.getWorldId());
+                continue;
+            }
 
             this.debug("Changes detected in " + world.getName() + " " + lodModelToDelete.getX() + " " + lodModelToDelete.getZ() + ".");
 
@@ -632,19 +685,53 @@ public class DhSupport implements Configurable
 
     public void preGenerate(WorldInterface world, int centerX, int centerZ, int radius, boolean force)
     {
-        if (this.isPreGenerating(world)) {
+        PreGenerator current = this.preGenerators.get(world.getId());
+        if (current != null && current.isRunning()) {
             this.info("Cannot run multiple pre-generators in the same world. Stopping current task for " + world.getName() + "...");
+            current.stop();
+            current.getCompletion().whenComplete((ignored, error) ->
+                this.preGenerateAsync(world, centerX, centerZ, radius, force, null)
+            );
+            return;
+        }
+        this.preGenerateAsync(world, centerX, centerZ, radius, force, null);
+    }
 
-            this.stopPreGenerator(world);
+    public CompletableFuture<PreGenerator> preGenerateAsync(
+        WorldInterface world,
+        int centerX,
+        int centerZ,
+        int radius,
+        boolean force,
+        @Nullable Boolean generateNewChunksOverride
+    )
+    {
+        if (this.isPreGenerating(world)) {
+            return CompletableFuture.failedFuture(
+                new IllegalStateException("A DH pregenerator is already running for " + world.getName())
+            );
         }
 
-        this.preGenerators.put(world.getId(), new PreGenerator(this, world, centerX, centerZ, radius, force));
+        PreGenerator preGenerator = new PreGenerator(
+            this,
+            world,
+            centerX,
+            centerZ,
+            radius,
+            force,
+            generateNewChunksOverride
+        );
+        this.preGenerators.put(world.getId(), preGenerator);
 
         this.getScheduler().runOnSeparateThread(() -> {
-            this.preGenerators.get(world.getId()).run();
+            preGenerator.run();
 
             return null;
         });
+
+        return preGenerator.getCompletion()
+            .whenComplete((ignored, error) -> this.preGenerators.remove(world.getId(), preGenerator))
+            .thenApply((ignored) -> preGenerator);
     }
 
     public @Nullable PreGenerator getPreGenerator(WorldInterface world)
@@ -656,8 +743,6 @@ public class DhSupport implements Configurable
     {
         if (this.isPreGenerating(world)) {
             this.getPreGenerator(world).stop();
-
-            this.preGenerators.remove(world.getId());
         }
     }
 
@@ -670,6 +755,20 @@ public class DhSupport implements Configurable
             Coordinates.blockToSection(centerX + radius),
             Coordinates.blockToSection(centerZ + radius)
         );
+    }
+
+    public CompletableFuture<Void> awaitIdle()
+    {
+        CompletableFuture<?>[] generationFutures = this.queuedBuilders.values().toArray(CompletableFuture[]::new);
+        CompletableFuture<?>[] preGenerationFutures = this.preGenerators.values().stream()
+            .map(PreGenerator::getCompletion)
+            .toArray(CompletableFuture[]::new);
+
+        CompletableFuture<Void> generations = CompletableFuture.allOf(generationFutures)
+            .handle((ignored, exception) -> null)
+            .thenCompose((ignored) -> CompletableFuture.allOf(preGenerationFutures).handle((value, exception) -> null));
+
+        return generations.thenCompose((ignored) -> this.lodRepository.awaitIdle());
     }
 
     public CompletableFuture<Double> benchmark(UUID worldId, int iterations, int concurrency)

@@ -29,6 +29,7 @@ import no.jckf.dhsupport.core.message.plugin.FullDataSourceRequestMessage;
 import no.jckf.dhsupport.core.message.plugin.FullDataSourceResponseMessage;
 import no.jckf.dhsupport.core.world.WorldInterface;
 import org.bukkit.Bukkit;
+import org.bukkit.entity.Player;
 
 import java.util.UUID;
 
@@ -61,9 +62,18 @@ public class LodHandler
             }
 
             // TODO: Some sort of Player wrapper or interface object. Bukkit classes should not be imported here.
-            UUID worldUuid = Bukkit.getPlayer(requestMessage.getSender()).getWorld().getUID();
+            Player player = Bukkit.getPlayer(requestMessage.getSender());
+            if (player == null) {
+                this.reject(requestMessage, "Player is no longer online");
+                return;
+            }
+            UUID worldUuid = player.getWorld().getUID();
 
             WorldInterface world = this.dhSupport.getWorldInterface(worldUuid);
+            if (world == null) {
+                this.reject(requestMessage, "World is not registered with DH Support");
+                return;
+            }
 
             Configuration config = world.getConfig();
             Configuration playerConfig = this.dhSupport.getPlayerConfiguration(requestMessage.getSender());
@@ -80,24 +90,8 @@ public class LodHandler
             SectionPosition position = requestMessage.getPosition();
 
             String builderType = config.getString(DhsConfig.BUILDER_TYPE);
-
-            if (builderType.equalsIgnoreCase("none") && !this.dhSupport.getLodRepository().lodExists(worldUuid, position.getX(), position.getZ())) {
-                ExceptionMessage exceptionMessage = new ExceptionMessage();
-                exceptionMessage.isResponseTo(requestMessage);
-                exceptionMessage.setTypeId(ExceptionMessage.TYPE_REQUEST_REJECTED);
-                exceptionMessage.setMessage("Server has disabled LOD builder");
-                this.pluginMessageHandler.sendPluginMessage(requestMessage.getSender(), exceptionMessage);
-                return;
-            }
-
-            if (this.dhSupport.isPaused() && !this.dhSupport.getLodRepository().lodExists(worldUuid, position.getX(), position.getZ())) {
-                ExceptionMessage exceptionMessage = new ExceptionMessage();
-                exceptionMessage.isResponseTo(requestMessage);
-                exceptionMessage.setTypeId(ExceptionMessage.TYPE_REQUEST_REJECTED);
-                exceptionMessage.setMessage("Server has paused Distant Horizons");
-                this.pluginMessageHandler.sendPluginMessage(requestMessage.getSender(), exceptionMessage);
-                return;
-            }
+            boolean builderDisabled = builderType.equalsIgnoreCase("none");
+            boolean paused = this.dhSupport.isPaused();
 
             int worldX = Coordinates.sectionToBlock(position.getX());
             int worldZ = Coordinates.sectionToBlock(position.getZ());
@@ -143,61 +137,83 @@ public class LodHandler
                 }
             }*/
 
-            this.dhSupport.getLod(worldUuid, position)
-                .thenAccept((lodModel) -> {
-                    if (lodModel == null) {
-                        ExceptionMessage exceptionMessage = new ExceptionMessage();
-                        exceptionMessage.isResponseTo(requestMessage);
-                        exceptionMessage.setTypeId(ExceptionMessage.TYPE_REQUEST_REJECTED);
-                        exceptionMessage.setMessage("No LOD available");
-                        this.pluginMessageHandler.sendPluginMessage(requestMessage.getSender(), exceptionMessage);
+            if (!builderDisabled && !paused) {
+                this.serveLod(requestMessage, worldUuid, position, playerConfig);
+                return;
+            }
+
+            this.dhSupport.getLodRepository()
+                .lodExistsAsync(worldUuid, position.getX(), position.getZ())
+                .thenAccept((exists) -> {
+                    if (!exists) {
+                        this.reject(
+                            requestMessage,
+                            builderDisabled ? "Server has disabled LOD builder" : "Server has paused Distant Horizons"
+                        );
                         return;
                     }
-
-                    FullDataSourceResponseMessage responseMessage = new FullDataSourceResponseMessage();
-                    responseMessage.isResponseTo(requestMessage);
-
-                    boolean sendData = requestMessage.getTimestamp() == null || (requestMessage.getTimestamp() / 1000) < lodModel.getTimestamp();
-
-                    if (sendData) {
-                        int myBufferId = playerConfig.increment("buffer-id");
-
-                        responseMessage.setBufferId(myBufferId);
-                        responseMessage.setBeacons(lodModel.getBeacons());
-
-                        byte[] data = lodModel.getData();
-
-                        int chunkCount = (int) Math.ceil((double) data.length / CHUNK_SIZE);
-
-                        for (int chunkNo = 0; chunkNo < chunkCount; chunkNo++) {
-                            FullDataChunkMessage chunkResponse = new FullDataChunkMessage();
-                            chunkResponse.setBufferId(myBufferId);
-                            chunkResponse.setIsFirst(chunkNo == 0);
-                            chunkResponse.setData(
-                                data,
-                                CHUNK_SIZE * chunkNo,
-                                Math.min(CHUNK_SIZE, data.length - CHUNK_SIZE * chunkNo)
-                            );
-
-                            this.pluginMessageHandler.sendPluginMessage(requestMessage.getSender(), chunkResponse);
-                        }
-
-                        //this.dhSupport.info("LOD in " + chunkCount + " parts sent for " + requestMessage.getPosition().getX() + " " + requestMessage.getPosition().getZ());
-                    }
-
-                    this.pluginMessageHandler.sendPluginMessage(requestMessage.getSender(), responseMessage);
+                    this.serveLod(requestMessage, worldUuid, position, playerConfig);
                 })
                 .exceptionally((exception) -> {
-                    exception.printStackTrace();
-
-                    ExceptionMessage exceptionMessage = new ExceptionMessage();
-                    exceptionMessage.isResponseTo(requestMessage);
-                    exceptionMessage.setTypeId(ExceptionMessage.TYPE_REQUEST_REJECTED);
-                    exceptionMessage.setMessage("Internal error");
-                    this.pluginMessageHandler.sendPluginMessage(requestMessage.getSender(), exceptionMessage);
-
+                    this.reject(requestMessage, "Internal error");
                     return null;
                 });
         });
+    }
+
+    protected void serveLod(
+        FullDataSourceRequestMessage requestMessage,
+        UUID worldUuid,
+        SectionPosition position,
+        Configuration playerConfig
+    )
+    {
+        this.dhSupport.getLod(worldUuid, position)
+            .thenAccept((lodModel) -> {
+                if (lodModel == null) {
+                    this.reject(requestMessage, "No LOD available");
+                    return;
+                }
+
+                FullDataSourceResponseMessage responseMessage = new FullDataSourceResponseMessage();
+                responseMessage.isResponseTo(requestMessage);
+                boolean sendData = requestMessage.getTimestamp() == null ||
+                    (requestMessage.getTimestamp() / 1000) < lodModel.getTimestamp();
+
+                if (sendData) {
+                    int myBufferId = playerConfig.increment("buffer-id");
+                    responseMessage.setBufferId(myBufferId);
+                    responseMessage.setBeacons(lodModel.getBeacons());
+                    byte[] data = lodModel.getData();
+                    int chunkCount = (int) Math.ceil((double) data.length / CHUNK_SIZE);
+
+                    for (int chunkNo = 0; chunkNo < chunkCount; chunkNo++) {
+                        FullDataChunkMessage chunkResponse = new FullDataChunkMessage();
+                        chunkResponse.setBufferId(myBufferId);
+                        chunkResponse.setIsFirst(chunkNo == 0);
+                        chunkResponse.setData(
+                            data,
+                            CHUNK_SIZE * chunkNo,
+                            Math.min(CHUNK_SIZE, data.length - CHUNK_SIZE * chunkNo)
+                        );
+                        this.pluginMessageHandler.sendPluginMessage(requestMessage.getSender(), chunkResponse);
+                    }
+                }
+
+                this.pluginMessageHandler.sendPluginMessage(requestMessage.getSender(), responseMessage);
+            })
+            .exceptionally((exception) -> {
+                this.reject(requestMessage, "Internal error");
+                return null;
+            });
+    }
+
+    protected void reject(FullDataSourceRequestMessage requestMessage, String message)
+    {
+        ExceptionMessage exceptionMessage = new ExceptionMessage();
+        exceptionMessage.isResponseTo(requestMessage);
+        exceptionMessage.setTypeId(ExceptionMessage.TYPE_REQUEST_REJECTED);
+        exceptionMessage.setMessage(message);
+        this.pluginMessageHandler.sendPluginMessage(requestMessage.getSender(), exceptionMessage);
     }
 }

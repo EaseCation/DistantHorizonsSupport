@@ -30,6 +30,7 @@ replay_pid*
 # Gradle output
 /.gradle
 /build
+/api/build
 
 # Test server
 /server

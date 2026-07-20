@@ -27,6 +27,9 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 
 public class PreGenerator implements Runnable
 {
@@ -46,15 +49,34 @@ public class PreGenerator implements Runnable
 
     protected int stepsSoFar = 0;
 
-    protected int inFlight = 0;
+    protected AtomicInteger inFlight = new AtomicInteger();
 
     protected boolean run = true;
+
+    protected boolean cancelled = false;
 
     protected long startTime = 0;
 
     protected long stopTime = 0;
 
+    protected Boolean generateNewChunksOverride;
+
+    protected CompletableFuture<Void> completion = new CompletableFuture<>();
+
     public PreGenerator(DhSupport dhSupport, WorldInterface world, int centerX, int centerZ, int radius, boolean force)
+    {
+        this(dhSupport, world, centerX, centerZ, radius, force, null);
+    }
+
+    public PreGenerator(
+        DhSupport dhSupport,
+        WorldInterface world,
+        int centerX,
+        int centerZ,
+        int radius,
+        boolean force,
+        Boolean generateNewChunksOverride
+    )
     {
         this.dhSupport = dhSupport;
         this.world = world;
@@ -62,13 +84,27 @@ public class PreGenerator implements Runnable
         this.centerZ = Coordinates.blockToSection(centerZ);
         this.radius = radius;
         this.force = force;
+        this.generateNewChunksOverride = generateNewChunksOverride;
 
         this.totalSteps = (int) Math.pow((double) Coordinates.blockToChunk(this.radius) / 2, 2);
     }
 
     public void run()
     {
-        int rateLimit = this.world.getConfig().getInt(DhsConfig.FULL_DATA_REQUEST_CONCURRENCY_LIMIT);
+        try {
+            this.runGeneration();
+            this.completion.complete(null);
+        } catch (Throwable exception) {
+            this.completion.completeExceptionally(exception);
+        } finally {
+            this.stopTime = System.currentTimeMillis();
+            this.run = false;
+        }
+    }
+
+    protected void runGeneration()
+    {
+        int rateLimit = Math.max(1, this.world.getConfig().getInt(DhsConfig.FULL_DATA_REQUEST_CONCURRENCY_LIMIT));
 
         int currentX = this.centerX;
         int currentZ = this.centerZ;
@@ -77,6 +113,7 @@ public class PreGenerator implements Runnable
         int dirIndex = 0;
 
         List<CompletableFuture<LodModel>> requests = new ArrayList<>(rateLimit);
+        AtomicReference<Throwable> firstFailure = new AtomicReference<>();
 
         this.startTime = System.currentTimeMillis();
 
@@ -96,7 +133,9 @@ public class PreGenerator implements Runnable
                     currentX += directions[dirIndex][0];
                     currentZ += directions[dirIndex][1];
 
-                    if (!this.force && this.dhSupport.lodRepository.lodExists(this.world.getId(), currentX, currentZ)) {
+                    if (!this.force && this.dhSupport.lodRepository
+                        .lodExistsAsync(this.world.getId(), currentX, currentZ)
+                        .join()) {
                         continue;
                     }
 
@@ -105,16 +144,26 @@ public class PreGenerator implements Runnable
                     position.setZ(currentZ);
                     position.setDetailLevel(6);
 
-                    CompletableFuture<LodModel> request = this.dhSupport.generateLod(this.world.getId(), position, true);
-
-                    request.handle((lodModel, exception) -> this.inFlight--);
+                    CompletableFuture<LodModel> request = this.dhSupport.generateLod(
+                        this.world.getId(),
+                        position,
+                        true,
+                        this.generateNewChunksOverride
+                    );
 
                     requests.add(request);
+                    this.inFlight.incrementAndGet();
+                    request.whenComplete((lodModel, exception) -> {
+                        if (exception != null) {
+                            firstFailure.compareAndSet(null, exception);
+                        }
+                        this.inFlight.decrementAndGet();
+                    });
 
-                    this.inFlight++;
-
-                    while (this.inFlight >= rateLimit) {
-                        CompletableFuture.anyOf(requests.toArray(new CompletableFuture[0])).join();
+                    while (this.inFlight.get() >= rateLimit) {
+                        CompletableFuture.anyOf(requests.toArray(new CompletableFuture[0]))
+                            .handle((ignored, exception) -> null)
+                            .join();
 
                         requests.removeIf(CompletableFuture::isDone);
                     }
@@ -124,14 +173,18 @@ public class PreGenerator implements Runnable
             }
         }
 
-        this.stopTime = System.currentTimeMillis();
+        CompletableFuture.allOf(requests.toArray(new CompletableFuture[0]))
+            .handle((ignored, exception) -> null)
+            .join();
 
-        this.run = false;
+        if (firstFailure.get() != null) {
+            throw new CompletionException(firstFailure.get());
+        }
     }
 
     public int getCompletedRequests()
     {
-        return this.stepsSoFar - this.inFlight;
+        return this.stepsSoFar - this.inFlight.get();
     }
 
     public int getTargetRequests()
@@ -160,6 +213,17 @@ public class PreGenerator implements Runnable
 
     public void stop()
     {
+        this.cancelled = true;
         this.run = false;
+    }
+
+    public boolean wasCancelled()
+    {
+        return this.cancelled;
+    }
+
+    public CompletableFuture<Void> getCompletion()
+    {
+        return this.completion;
     }
 }

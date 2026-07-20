@@ -18,7 +18,6 @@
 
 package no.jckf.dhsupport.bukkit.handler;
 
-import no.jckf.dhsupport.bukkit.BukkitWorldInterface;
 import no.jckf.dhsupport.bukkit.DhSupportBukkitPlugin;
 import no.jckf.dhsupport.core.configuration.DhsConfig;
 import org.bukkit.Chunk;
@@ -58,13 +57,7 @@ public class WorldHandler implements Listener
 
     protected void addWorldInterface(World world)
     {
-        BukkitWorldInterface worldInterface = new BukkitWorldInterface(this.plugin, world, this.plugin.getDhSupport().getConfig());
-
-        worldInterface.setLogger(this.plugin.getDhSupport().getLogger());
-
-        worldInterface.doUnsafeThings();
-
-        this.plugin.getDhSupport().setWorldInterface(world.getUID(), worldInterface);
+        this.plugin.ensureWorldRegistered(world);
     }
 
     protected void removeWorldInterface(World world)

@@ -18,11 +18,13 @@
 
 package no.jckf.dhsupport.core.database.models;
 
+import net.easecation.dhsupport.api.DhArtifactContract;
+
 import java.util.UUID;
 
 public class LodModel extends Model
 {
-    public static int VERSION = 2;
+    public static int VERSION = DhArtifactContract.LOD_VERSION;
 
     public static LodModel create()
     {

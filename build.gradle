@@ -4,7 +4,7 @@ plugins {
 }
 
 group = 'no.jckf.dhs'
-version = '0.14.0'
+version = '0.14.0-ec.1'
 description = 'Distant Horizons Support'
 
 java {
@@ -12,7 +12,7 @@ java {
 }
 
 def paperVersions = [
-    '1.16.5',
+    '1.21.10',
 ]
 
 repositories {
@@ -30,15 +30,18 @@ configurations {
 
 dependencies {
     compileOnly 'org.jetbrains:annotations:25.0.0'
+    compileOnly 'org.xerial:sqlite-jdbc:3.47.1.0'
 
     implementation 'com.google.guava:guava:33.3.1-jre'
 
+    shade project(':api')
     shade 'org.bstats:bstats-bukkit:3.1.0'
     shade 'org.json:json:20240303'
     shade 'org.tukaani:xz:1.10'
     shade 'com.github.technicallycoded:FoliaLib:v0.4.3'
 
     testImplementation 'junit:junit:4.11'
+    testRuntimeOnly 'org.xerial:sqlite-jdbc:3.47.1.0'
 }
 
 paperVersions.each { mcVersion ->
@@ -71,8 +74,7 @@ paperVersions.each { mcVersion ->
     }
 
     dependencies {
-        compileOnly "com.destroystokyo.paper:paper-api:${mcVersion}-R0.1-SNAPSHOT"
-        //compileOnly "io.papermc.paper:paper-api:${mcVersion}-R0.1-SNAPSHOT"
+        compileOnly "io.papermc.paper:paper-api:${mcVersion}-R0.1-SNAPSHOT"
     }
 
     task(taskName, type: com.github.jengelman.gradle.plugins.shadow.tasks.ShadowJar) {
@@ -104,4 +106,9 @@ paperVersions.each { mcVersion ->
     }
 
     build.dependsOn(taskName)
+}
+
+test {
+    // The bulk artifact suite deliberately moves more SQLite BLOB data than the test worker heap.
+    maxHeapSize = '128m'
 }
