@@ -37,6 +37,9 @@ public interface DhSupportRuntimeApi
 
     CompletableFuture<DhImportResult> importWorldLods(UUID worldId, Path artifact, DhImportMode mode);
 
+    /** Returns true only when the import ledger and world LOD rows both still exist. */
+    CompletableFuture<Boolean> isWorldArtifactImported(UUID worldId, String artifactSha256);
+
     CompletableFuture<Long> countWorldLods(UUID worldId);
 
     CompletableFuture<Long> deleteWorldLods(UUID worldId);

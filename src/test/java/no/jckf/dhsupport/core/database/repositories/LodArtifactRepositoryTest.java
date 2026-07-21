@@ -24,6 +24,7 @@ import java.util.concurrent.CompletionException;
 import java.util.logging.Logger;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
@@ -92,12 +93,21 @@ public class LodArtifactRepositoryTest
             .join();
         assertEquals(DhImportStatus.IMPORTED, firstImport.status());
         assertEquals(2L, this.repository.countWorldLodsAsync(worldId).join().longValue());
+        assertTrue(this.repository.isWorldArtifactImportedAsync(worldId, firstImport.artifactSha256()).join());
 
         DhImportResult secondImport = this.repository
             .importWorldLodsAsync(worldId, artifact, DhImportMode.REPLACE_WORLD)
             .join();
         assertEquals(DhImportStatus.ALREADY_IMPORTED, secondImport.status());
         assertEquals(firstImport.artifactSha256(), secondImport.artifactSha256());
+
+        DhImportResult forcedImport = this.repository
+            .importWorldLodsAsync(worldId, artifact, DhImportMode.FORCE_REPLACE_WORLD)
+            .join();
+        assertEquals(DhImportStatus.IMPORTED, forcedImport.status());
+
+        this.repository.deleteWorldLodsAsync(worldId).join();
+        assertFalse(this.repository.isWorldArtifactImportedAsync(worldId, firstImport.artifactSha256()).join());
     }
 
     @Test

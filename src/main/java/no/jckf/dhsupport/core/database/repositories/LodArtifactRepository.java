@@ -136,7 +136,7 @@ final class LodArtifactRepository
         ArtifactMetadata metadata = validateArtifact(artifact, worldId);
         Connection connection = this.database.getConnection();
 
-        if (wasImported(connection, worldId, artifactSha256)) {
+        if (mode != DhImportMode.FORCE_REPLACE_WORLD && wasImported(connection, worldId, artifactSha256)) {
             return new DhImportResult(worldId, DhImportStatus.ALREADY_IMPORTED, metadata.lodCount(), artifactSha256);
         }
 
@@ -146,7 +146,7 @@ final class LodArtifactRepository
         try {
             configureImportDatabases(connection);
             connection.setAutoCommit(false);
-            if (mode == DhImportMode.REPLACE_WORLD) {
+            if (mode == DhImportMode.REPLACE_WORLD || mode == DhImportMode.FORCE_REPLACE_WORLD) {
                 try (PreparedStatement statement = connection.prepareStatement("DELETE FROM main.lods WHERE worldId = ?")) {
                     statement.setString(1, worldId.toString());
                     statement.executeUpdate();
@@ -164,7 +164,7 @@ final class LodArtifactRepository
             }
 
             try (PreparedStatement statement = connection.prepareStatement("""
-                INSERT INTO main.ec_imported_lod_artifacts
+                INSERT OR REPLACE INTO main.ec_imported_lod_artifacts
                     (revision, artifact_sha256, world_uuid, lod_count, imported_at, api_version)
                 VALUES (?, ?, ?, ?, ?, ?)
             """)) {
@@ -186,6 +186,33 @@ final class LodArtifactRepository
             restoreAutoCommit(connection, previousAutoCommit);
             detachQuietly(connection);
             throw exception;
+        }
+    }
+
+    boolean isWorldArtifactImported(UUID worldId, String artifactSha256) throws SQLException
+    {
+        if (artifactSha256 == null || !artifactSha256.matches("(?i)[0-9a-f]{64}")) {
+            return false;
+        }
+        Connection connection = this.database.getConnection();
+        try (PreparedStatement statement = connection.prepareStatement("""
+            SELECT 1
+            FROM ec_imported_lod_artifacts imported
+            WHERE imported.artifact_sha256 = ?
+              AND imported.world_uuid = ?
+              AND EXISTS (
+                  SELECT 1 FROM lods
+                  WHERE worldId = ?
+                  LIMIT 1
+              )
+            LIMIT 1
+        """)) {
+            statement.setString(1, artifactSha256.toLowerCase());
+            statement.setString(2, worldId.toString());
+            statement.setString(3, worldId.toString());
+            try (ResultSet result = statement.executeQuery()) {
+                return result.next();
+            }
         }
     }
 

@@ -98,6 +98,11 @@ public class AsyncLodRepository extends LodRepository
         return this.queueTask(() -> this.artifactRepository.importWorld(worldId, artifact, mode));
     }
 
+    public CompletableFuture<Boolean> isWorldArtifactImportedAsync(UUID worldId, String artifactSha256)
+    {
+        return this.queueTask(() -> this.artifactRepository.isWorldArtifactImported(worldId, artifactSha256));
+    }
+
     public CompletableFuture<Long> countWorldLodsAsync(UUID worldId)
     {
         return this.queueTask(() -> this.countWorldLods(worldId));

@@ -141,6 +141,14 @@ public final class BukkitDhSupportRuntimeApi implements DhSupportRuntimeApi
     }
 
     @Override
+    public CompletableFuture<Boolean> isWorldArtifactImported(UUID worldId, String artifactSha256)
+    {
+        requireWorld(worldId);
+        Objects.requireNonNull(artifactSha256, "artifactSha256");
+        return requireSupport().getLodRepository().isWorldArtifactImportedAsync(worldId, artifactSha256);
+    }
+
+    @Override
     public CompletableFuture<Long> countWorldLods(UUID worldId)
     {
         return requireSupport().getLodRepository().countWorldLodsAsync(worldId);

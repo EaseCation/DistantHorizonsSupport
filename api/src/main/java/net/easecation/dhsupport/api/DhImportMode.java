@@ -7,5 +7,8 @@ public enum DhImportMode
     MERGE,
 
     /** Delete all target rows for the world before importing the artifact. */
-    REPLACE_WORLD
+    REPLACE_WORLD,
+
+    /** Re-import even when the same artifact hash is already present in the import ledger. */
+    FORCE_REPLACE_WORLD
 }
