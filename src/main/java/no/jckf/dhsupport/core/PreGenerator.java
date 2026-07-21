@@ -192,6 +192,11 @@ public class PreGenerator implements Runnable
         return this.totalSteps;
     }
 
+    public int getInFlightRequests()
+    {
+        return this.inFlight.get();
+    }
+
     public float getProgress()
     {
         return (float) this.getCompletedRequests() / this.getTargetRequests();

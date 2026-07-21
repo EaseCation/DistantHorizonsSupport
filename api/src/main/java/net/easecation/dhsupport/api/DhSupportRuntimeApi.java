@@ -5,6 +5,7 @@ import org.bukkit.World;
 import java.nio.file.Path;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
+import java.util.Optional;
 
 /**
  * Stable Bukkit service for runtime Distant Horizons LOD operations.
@@ -21,6 +22,8 @@ public interface DhSupportRuntimeApi
     DhWorldRegistration ensureWorldRegistered(World world);
 
     CompletableFuture<DhPregenResult> preGenerate(World world, DhPregenRequest request);
+
+    Optional<DhPregenProgress> pregenerationProgress(UUID worldId);
 
     CompletableFuture<DhExportResult> exportWorldLods(UUID worldId, Path artifact);
 

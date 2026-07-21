@@ -34,6 +34,7 @@ import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.util.*;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.logging.Logger;
 
 public class BukkitWorldInterface implements WorldInterface
@@ -62,6 +63,8 @@ public class BukkitWorldInterface implements WorldInterface
     private Integer sectionZ;
 
     private final ChunkSnapshot[] chunks = new ChunkSnapshot[16];
+
+    private final Set<Long> heldChunkTickets = ConcurrentHashMap.newKeySet();
 
     protected EnumMap<Material, MaterialRecord> materialCache = new EnumMap<>(Material.class);
 
@@ -149,7 +152,7 @@ public class BukkitWorldInterface implements WorldInterface
         return newInstance;
     }
 
-    protected ChunkSnapshot getChunk(int x, int z)
+    protected synchronized ChunkSnapshot getChunk(int x, int z)
     {
         int chunkX = Coordinates.blockToChunk(x);
         int chunkZ = Coordinates.blockToChunk(z);
@@ -175,19 +178,28 @@ public class BukkitWorldInterface implements WorldInterface
             return chunk;
         }
 
-        Scheduler scheduler = this.plugin.getDhSupport().getScheduler();
+        throw new IllegalStateException(
+            "LOD builder requested an uncached chunk snapshot at " + chunkX + "," + chunkZ
+        );
+    }
 
-        if (scheduler.canReadWorldAsync()) {
-            chunk = this.world.getChunkAt(chunkX, chunkZ).getChunkSnapshot(true, true, false);
-        } else {
-            chunk = scheduler.runOnRegionThread(world.getUID(), x, z, () ->
-                this.world.getChunkAt(chunkX, chunkZ).getChunkSnapshot(true, true, false)
-            ).join();
+    protected synchronized void cacheChunkSnapshot(int x, int z, ChunkSnapshot snapshot)
+    {
+        int chunkX = Coordinates.blockToChunk(x);
+        int chunkZ = Coordinates.blockToChunk(z);
+        int sectionX = Coordinates.chunkToSection(chunkX);
+        int sectionZ = Coordinates.chunkToSection(chunkZ);
+
+        if (this.sectionX == null) {
+            this.sectionX = sectionX;
+            this.sectionZ = sectionZ;
+        } else if (this.sectionX != sectionX || this.sectionZ != sectionZ) {
+            throw new IllegalStateException("Chunk snapshot belongs to a different LOD section");
         }
 
-        this.chunks[index] = chunk;
-
-        return chunk;
+        int index = (chunkX - Coordinates.sectionToChunk(sectionX))
+            + ((chunkZ - Coordinates.sectionToChunk(sectionZ)) << 2);
+        this.chunks[index] = snapshot;
     }
 
     public boolean isInsideSection(int x, int z)
@@ -443,6 +455,84 @@ public class BukkitWorldInterface implements WorldInterface
         } catch (InvocationTargetException | IllegalAccessException exception) {
             throw new RuntimeException(exception);
         }
+    }
+
+    @Override
+    public CompletableFuture<Boolean> loadChunkSnapshotAsync(int x, int z, boolean generate)
+    {
+        if (this.isDummyMode()) {
+            return CompletableFuture.completedFuture(true);
+        }
+
+        int chunkX = Coordinates.blockToChunk(x);
+        int chunkZ = Coordinates.blockToChunk(z);
+        long packed = Coordinates.pack(chunkX, chunkZ);
+        long startedAt = System.nanoTime();
+
+        this.plugin.getDhSupport().getAsyncSnapshotTracker().begin(this.world.getUID(), chunkX, chunkZ, startedAt);
+
+        CompletableFuture<Chunk> chunkFuture;
+        if (this.getChunkAtAsync == null) {
+            chunkFuture = this.plugin.getDhSupport().getScheduler().runOnRegionThread(
+                this.world.getUID(), x, z, () -> {
+                    if (!this.world.loadChunk(chunkX, chunkZ, generate)) {
+                        return null;
+                    }
+                    return this.world.getChunkAt(chunkX, chunkZ);
+                }
+            );
+        } else {
+            try {
+                chunkFuture = (CompletableFuture<Chunk>) this.getChunkAtAsync.invoke(this.world, chunkX, chunkZ, generate);
+            } catch (InvocationTargetException | IllegalAccessException exception) {
+                this.plugin.getDhSupport().getAsyncSnapshotTracker().complete(this.world.getUID(), chunkX, chunkZ);
+                return CompletableFuture.failedFuture(exception);
+            }
+        }
+
+        return chunkFuture.thenApply(chunk -> {
+            if (chunk == null) {
+                return false;
+            }
+
+            boolean ticketAdded = chunk.addPluginChunkTicket(this.plugin);
+            if (ticketAdded) {
+                this.heldChunkTickets.add(packed);
+            }
+
+            try {
+                this.cacheChunkSnapshot(x, z, chunk.getChunkSnapshot(true, true, false, true));
+                return true;
+            } catch (RuntimeException exception) {
+                if (ticketAdded) {
+                    this.heldChunkTickets.remove(packed);
+                    chunk.removePluginChunkTicket(this.plugin);
+                }
+                throw exception;
+            }
+        }).whenComplete((ignored, exception) ->
+            this.plugin.getDhSupport().getAsyncSnapshotTracker().complete(this.world.getUID(), chunkX, chunkZ)
+        );
+    }
+
+    @Override
+    public CompletableFuture<Void> releaseChunkTicketsAsync()
+    {
+        CompletableFuture<?>[] releases = this.heldChunkTickets.stream()
+            .map(packed -> {
+                int chunkX = Coordinates.unpackX(packed);
+                int chunkZ = Coordinates.unpackZ(packed);
+                return this.plugin.getDhSupport().getScheduler().runOnRegionThread(
+                    this.world.getUID(), Coordinates.chunkToBlock(chunkX), Coordinates.chunkToBlock(chunkZ), () -> {
+                        this.world.removePluginChunkTicket(chunkX, chunkZ, this.plugin);
+                        this.heldChunkTickets.remove(packed);
+                        return null;
+                    }
+                );
+            })
+            .toArray(CompletableFuture[]::new);
+
+        return CompletableFuture.allOf(releases);
     }
 
     @Override

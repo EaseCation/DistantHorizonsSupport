@@ -59,6 +59,14 @@ public interface WorldInterface extends Configurable
 
     CompletableFuture<Boolean> loadOrGenerateChunkAsync(int x, int z);
 
+    /**
+     * Loads a chunk to FULL asynchronously, pins it, and caches a thread-safe snapshot.
+     */
+    CompletableFuture<Boolean> loadChunkSnapshotAsync(int x, int z, boolean generate);
+
+    /** Releases all chunk tickets retained while building this interface's LOD section. */
+    CompletableFuture<Void> releaseChunkTicketsAsync();
+
     boolean unloadChunk(int x, int z);
 
     boolean unloadChunkAsync(int x, int z);

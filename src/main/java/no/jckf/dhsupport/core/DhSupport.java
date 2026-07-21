@@ -48,6 +48,7 @@ import java.lang.reflect.Constructor;
 import java.lang.reflect.InvocationTargetException;
 import java.util.*;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
@@ -78,6 +79,8 @@ public class DhSupport implements Configurable
     protected CompletableFuture<?> pause;
 
     protected PerformanceTracker generationTracker = new PerformanceTracker();
+
+    protected AsyncSnapshotTracker asyncSnapshotTracker = new AsyncSnapshotTracker();
 
     protected Map<UUID, WorldInterface> worldInterfaces = new ConcurrentHashMap<>();
 
@@ -226,6 +229,11 @@ public class DhSupport implements Configurable
     public PerformanceTracker getGenerationTracker()
     {
         return this.generationTracker;
+    }
+
+    public AsyncSnapshotTracker getAsyncSnapshotTracker()
+    {
+        return this.asyncSnapshotTracker;
     }
 
     public void setWorldInterface(UUID id, @Nullable WorldInterface worldInterface)
@@ -421,9 +429,6 @@ public class DhSupport implements Configurable
         @Nullable Boolean generateNewChunksOverride
     )
     {
-        int worldX = Coordinates.sectionToBlock(position.getX());
-        int worldZ = Coordinates.sectionToBlock(position.getZ());
-
         WorldInterface registeredWorld = this.getWorldInterface(worldId);
         if (registeredWorld == null) {
             return CompletableFuture.failedFuture(
@@ -436,26 +441,19 @@ public class DhSupport implements Configurable
             ? generateNewChunksOverride
             : world.getConfig().getBool(DhsConfig.GENERATE_NEW_CHUNKS, true);
 
-        Map<Long, CompletableFuture<Boolean>> loads = new HashMap<>();
+        List<CompletableFuture<Boolean>> snapshots = new ArrayList<>(16);
+        boolean generateSnapshots = manageChunks && generateNewChunks;
 
-        if (manageChunks) {
-            // Load all the chunks we need for this request.
-            Coordinates.foreachChunkInSection(position.getX(), position.getZ(), (chunkX, chunkZ) -> {
-                if (!world.isChunkLoaded(chunkX, chunkZ)) {
-                    if (generateNewChunks) {
-                        loads.put(Coordinates.pack(chunkX, chunkZ), world.loadOrGenerateChunkAsync(chunkX, chunkZ));
-                    } else {
-                        loads.put(Coordinates.pack(chunkX, chunkZ), world.loadChunkAsync(chunkX, chunkZ));
-                    }
-                }
-            });
-        }
+        // Always request all 16 FULL chunks asynchronously. A chunk that was already loaded by
+        // another plugin can otherwise unload between the isLoaded check and snapshot capture.
+        Coordinates.foreachChunkInSection(position.getX(), position.getZ(), (blockX, blockZ) ->
+            snapshots.add(world.loadChunkSnapshotAsync(blockX, blockZ, generateSnapshots))
+        );
 
-        // Wait for chunk loads, then...
-        return CompletableFuture.allOf(loads.values().toArray(new CompletableFuture[0]))
-            .thenComposeAsync((asd) -> {
-                boolean loadRejected = loads
-                    .values()
+        CompletableFuture<LodModel> generation = CompletableFuture
+            .allOf(snapshots.toArray(new CompletableFuture[0]))
+            .thenComposeAsync((ignored) -> {
+                boolean loadRejected = snapshots
                     .stream()
                     .map(loadRequest -> {
                         try {
@@ -469,24 +467,7 @@ public class DhSupport implements Configurable
                 if (loadRejected) {
                     // Use dummy chunks instead of real world data.
                     world.setDummyMode(true);
-                } else {
-                    // Prime chunk data in world interface.
-                    Coordinates.foreachChunkInSection(position.getX(), position.getZ(), (chunkX, chunkZ) -> {
-                        world.getMaterialAt(chunkX, world.getSeaLevel(), chunkZ);
-                    });
                 }
-
-                // Discard the chunks we loaded.
-                this.getScheduler().runOnRegionThread(worldId, worldX, worldZ, () -> {
-                    for (long packed : loads.keySet()) {
-                        world.discardChunk(
-                            Coordinates.unpackX(packed),
-                            Coordinates.unpackZ(packed)
-                        );
-                    }
-
-                    return null;
-                });
 
                 // No LOD was found. Start building a new one.
                 LodBuilder builder = this.getBuilder(world, position);
@@ -518,6 +499,19 @@ public class DhSupport implements Configurable
                 })
                 .thenCompose((f) -> f); // Unwrap the nested future.
             });
+
+        // Retain tickets until the snapshot-only builder and repository write have settled.
+        return generation.handle((model, generationError) ->
+            world.releaseChunkTicketsAsync().handle((ignored, cleanupError) -> {
+                if (generationError != null) {
+                    throw new CompletionException(generationError);
+                }
+                if (cleanupError != null) {
+                    throw new CompletionException(cleanupError);
+                }
+                return model;
+            })
+        ).thenCompose(cleanup -> cleanup);
     }
 
     public void touchLod(UUID worldId, int x, int z, @Nullable String reason)

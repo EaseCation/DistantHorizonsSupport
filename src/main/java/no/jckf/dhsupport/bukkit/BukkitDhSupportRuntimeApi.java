@@ -15,16 +15,19 @@ import net.easecation.dhsupport.api.DhExportResult;
 import net.easecation.dhsupport.api.DhImportMode;
 import net.easecation.dhsupport.api.DhImportResult;
 import net.easecation.dhsupport.api.DhPregenRequest;
+import net.easecation.dhsupport.api.DhPregenProgress;
 import net.easecation.dhsupport.api.DhPregenResult;
 import net.easecation.dhsupport.api.DhSupportRuntimeApi;
 import net.easecation.dhsupport.api.DhWorldRegistration;
 import no.jckf.dhsupport.core.DhSupport;
+import no.jckf.dhsupport.core.AsyncSnapshotTracker;
 import no.jckf.dhsupport.core.PreGenerator;
 import no.jckf.dhsupport.core.world.WorldInterface;
 import org.bukkit.World;
 
 import java.nio.file.Path;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 
@@ -73,6 +76,42 @@ public final class BukkitDhSupportRuntimeApi implements DhSupportRuntimeApi
             )
             .thenCompose((preGenerator) -> support.getLodRepository().awaitIdle()
                 .thenApply((ignored) -> toResult(registration.worldId(), preGenerator)));
+    }
+
+    @Override
+    public Optional<DhPregenProgress> pregenerationProgress(UUID worldId)
+    {
+        DhSupport support = requireSupport();
+        WorldInterface world = support.getWorldInterface(worldId);
+        if (world == null) {
+            return Optional.empty();
+        }
+        PreGenerator generator = support.getPreGenerator(world);
+        if (generator == null) {
+            return Optional.empty();
+        }
+
+        AsyncSnapshotTracker.Snapshot chunks = support.getAsyncSnapshotTracker().snapshot(worldId);
+        String phase;
+        if (chunks.activeLoads() == 0) {
+            phase = "DH_LOD";
+        } else if (chunks.oldestWait().toSeconds() >= 5) {
+            phase = "DH_ASYNC_FULL_WAIT";
+        } else {
+            phase = "DH_ASYNC_SNAPSHOT";
+        }
+        return Optional.of(new DhPregenProgress(
+            worldId,
+            phase,
+            generator.getCompletedRequests(),
+            generator.getTargetRequests(),
+            generator.getInFlightRequests(),
+            chunks.activeLoads(),
+            chunks.oldestChunkX(),
+            chunks.oldestChunkZ(),
+            chunks.oldestWait(),
+            generator.getElapsedTime()
+        ));
     }
 
     @Override
