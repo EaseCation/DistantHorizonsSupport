@@ -53,12 +53,12 @@ max_data_transfer_speed: 0
 # If you disable this, the plugin will not be able to create LODs in areas where chunks don't already exist.
 # Optional.
 # Default: true
-#generate_new_chunks: false
+generate_new_chunks: false
 
 # Show warning during startup if chunk generation is enabled?
 # Optional.
 # Default: true
-#generate_new_chunks_warning: false
+generate_new_chunks_warning: false
 
 # Specs for a fake LOD to send when chunk generation is disabled and LOD requests otherwise would have been rejected.
 # Optional.

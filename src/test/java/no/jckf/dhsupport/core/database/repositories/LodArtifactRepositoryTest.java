@@ -111,6 +111,31 @@ public class LodArtifactRepositoryTest
     }
 
     @Test
+    public void forcedReplaceAdvancesTimestampsPastRuntimeChanges() throws Exception
+    {
+        UUID worldId = UUID.randomUUID();
+        save(worldId, 1, 2, new byte[] { 1, 2, 3 });
+        Path artifact = this.temporaryDirectory.resolve("reset-timestamp.sqlite");
+        this.repository.exportWorldLodsAsync(worldId, request(artifact)).join();
+
+        int runtimeTimestamp = Math.toIntExact(System.currentTimeMillis() / 1000L + 3_600L);
+        try (PreparedStatement statement = this.database.getConnection().prepareStatement(
+            "UPDATE lods SET timestamp = ? WHERE worldId = ?"
+        )) {
+            statement.setInt(1, runtimeTimestamp);
+            statement.setString(2, worldId.toString());
+            statement.executeUpdate();
+        }
+
+        this.repository.importWorldLodsAsync(worldId, artifact, DhImportMode.FORCE_REPLACE_WORLD).join();
+
+        assertEquals(
+            runtimeTimestamp + 1L,
+            queryLong("SELECT MAX(timestamp) FROM lods WHERE worldId = ?", worldId)
+        );
+    }
+
+    @Test
     public void importRollbackRestoresRowsAndDoesNotWriteMarker() throws Exception
     {
         UUID worldId = UUID.randomUUID();

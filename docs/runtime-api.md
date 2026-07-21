@@ -38,8 +38,11 @@ builder config SHA-256, LOD count, and creation time. Import rejects a mismatche
 second world UUID, or unsupported LOD version before modifying the main database.
 
 `ec_imported_lod_artifacts` records `(artifact_sha256, world_uuid)` after the LOD rows commit. Re-import returns
-`ALREADY_IMPORTED`. `REPLACE_WORLD` deletes and inserts the selected world inside the same transaction; any SQL error
-rolls back both deletion and marker.
+`ALREADY_IMPORTED`. `REPLACE_WORLD` deletes and inserts the selected world inside the same transaction.
+`FORCE_REPLACE_WORLD` additionally bypasses the ledger fast path and assigns every imported row a timestamp greater
+than both the replaced world and artifact maxima. This reset-specific timestamp rebase makes clients accept a
+baseline for the same world UUID even when their local runtime-edit cache was newer. Any SQL error rolls back the row
+replacement, timestamp rebase, and ledger marker together.
 
 `artifact_sha256` is the SHA-256 of the uncompressed SQLite bytes. `transport_sha256` belongs to the compressed
 GridFS object and is verified by the consumer before decompression.

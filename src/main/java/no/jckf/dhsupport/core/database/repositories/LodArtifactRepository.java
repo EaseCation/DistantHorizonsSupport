@@ -146,6 +146,9 @@ final class LodArtifactRepository
         try {
             configureImportDatabases(connection);
             connection.setAutoCommit(false);
+            Integer resetTimestamp = mode == DhImportMode.FORCE_REPLACE_WORLD
+                ? nextResetTimestamp(connection, worldId)
+                : null;
             if (mode == DhImportMode.REPLACE_WORLD || mode == DhImportMode.FORCE_REPLACE_WORLD) {
                 try (PreparedStatement statement = connection.prepareStatement("DELETE FROM main.lods WHERE worldId = ?")) {
                     statement.setString(1, worldId.toString());
@@ -153,14 +156,27 @@ final class LodArtifactRepository
                 }
             }
 
-            try (PreparedStatement statement = connection.prepareStatement("""
-                INSERT OR REPLACE INTO main.lods (worldId, x, z, data, beacons, timestamp, version)
-                SELECT worldId, x, z, data, beacons, timestamp, version
-                FROM ec_artifact.lods
-                WHERE worldId = ?
-            """)) {
-                statement.setString(1, worldId.toString());
-                statement.executeUpdate();
+            if (resetTimestamp == null) {
+                try (PreparedStatement statement = connection.prepareStatement("""
+                    INSERT OR REPLACE INTO main.lods (worldId, x, z, data, beacons, timestamp, version)
+                    SELECT worldId, x, z, data, beacons, timestamp, version
+                    FROM ec_artifact.lods
+                    WHERE worldId = ?
+                """)) {
+                    statement.setString(1, worldId.toString());
+                    statement.executeUpdate();
+                }
+            } else {
+                try (PreparedStatement statement = connection.prepareStatement("""
+                    INSERT OR REPLACE INTO main.lods (worldId, x, z, data, beacons, timestamp, version)
+                    SELECT worldId, x, z, data, beacons, ?, version
+                    FROM ec_artifact.lods
+                    WHERE worldId = ?
+                """)) {
+                    statement.setInt(1, resetTimestamp);
+                    statement.setString(2, worldId.toString());
+                    statement.executeUpdate();
+                }
             }
 
             try (PreparedStatement statement = connection.prepareStatement("""
@@ -393,6 +409,30 @@ final class LodArtifactRepository
                 return result.next();
             }
         }
+    }
+
+    private static int nextResetTimestamp(Connection connection, UUID worldId) throws SQLException
+    {
+        long currentMax;
+        try (PreparedStatement statement = connection.prepareStatement(
+            "SELECT COALESCE(MAX(timestamp), 0) FROM main.lods WHERE worldId = ?"
+        )) {
+            statement.setString(1, worldId.toString());
+            currentMax = singleLong(statement);
+        }
+
+        long artifactMax = queryLong(
+            connection,
+            "SELECT COALESCE(MAX(timestamp), 0) FROM ec_artifact.lods"
+        );
+        long resetTimestamp = Math.max(
+            Instant.now().getEpochSecond(),
+            Math.max(currentMax + 1L, artifactMax + 1L)
+        );
+        if (resetTimestamp > Integer.MAX_VALUE) {
+            throw new SQLException("LOD reset timestamp exceeds the protocol integer range: " + resetTimestamp);
+        }
+        return (int) resetTimestamp;
     }
 
     private static void requireTable(Connection connection, String table) throws SQLException

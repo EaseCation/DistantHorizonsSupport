@@ -9,6 +9,9 @@ public enum DhImportMode
     /** Delete all target rows for the world before importing the artifact. */
     REPLACE_WORLD,
 
-    /** Re-import even when the same artifact hash is already present in the import ledger. */
+    /**
+     * Re-import even when the same artifact hash is already present and advance every imported
+     * LOD timestamp past the replaced world, so clients accept an explicit world reset.
+     */
     FORCE_REPLACE_WORLD
 }
