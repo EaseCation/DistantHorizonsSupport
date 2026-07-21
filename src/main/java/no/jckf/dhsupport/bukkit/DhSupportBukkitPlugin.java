@@ -131,15 +131,15 @@ public class DhSupportBukkitPlugin extends JavaPlugin
     @Override
     public void onDisable()
     {
+        if (this.dhSupport != null) {
+            this.dhSupport.beginShutdown();
+        }
+
         this.getServer().getServicesManager().unregisterAll(this);
         this.runtimeApi = null;
 
         if (this.metrics != null) {
             this.metrics.shutdown();
-        }
-
-        if (this.scheduler != null) {
-            this.scheduler.cancelTasks();
         }
 
         if (this.pluginMessageProxy != null) {
@@ -154,7 +154,10 @@ public class DhSupportBukkitPlugin extends JavaPlugin
 
         if (this.dhSupport != null) {
             this.dhSupport.onDisable();
-            this.dhSupport = null;
+        }
+
+        if (this.scheduler != null) {
+            this.scheduler.cancelTasks();
         }
 
         this.getLogger().info("Lights out!");

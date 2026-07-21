@@ -531,7 +531,13 @@ public class BukkitWorldInterface implements WorldInterface
     @Override
     public CompletableFuture<Void> releaseChunkTicketsAsync()
     {
-        if (this.plugin.getServer().getWorld(this.world.getUID()) != this.world) {
+        // JavaPlugin is marked disabled before onDisable runs, so Bukkit/Folia will reject any
+        // newly scheduled region task here. Paper removes plugin tickets while disabling and
+        // shutdown unloads the world; only forget this interface's local ownership at that point.
+        if (!this.plugin.isEnabled()
+            || this.plugin.getDhSupport() == null
+            || this.plugin.getDhSupport().isShuttingDown()
+            || this.plugin.getServer().getWorld(this.world.getUID()) != this.world) {
             this.heldChunkTickets.clear();
             return CompletableFuture.completedFuture(null);
         }

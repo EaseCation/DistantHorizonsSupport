@@ -51,7 +51,7 @@ import java.util.*;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
@@ -98,6 +98,8 @@ public class DhSupport implements Configurable
 
     protected Map<UUID, PreGenerator> preGenerators = new ConcurrentHashMap<>();
 
+    private final AtomicBoolean shuttingDown = new AtomicBoolean();
+
     public DhSupport(String pluginVersion, String gameVersion)
     {
         this.pluginVersion = pluginVersion;
@@ -115,6 +117,7 @@ public class DhSupport implements Configurable
 
     public void onEnable()
     {
+        this.shuttingDown.set(false);
         this.lodRepository.setLogger(this.getLogger());
 
         try {
@@ -153,24 +156,31 @@ public class DhSupport implements Configurable
 
     public void onDisable()
     {
+        this.beginShutdown();
         this.preGenerators.values().forEach(PreGenerator::stop);
 
         if (this.pluginMessageHandler != null) {
             this.pluginMessageHandler.onDisable();
         }
 
-        try {
-            this.awaitIdle().orTimeout(10, TimeUnit.SECONDS).join();
-        } catch (Exception exception) {
-            this.warning("Timed out while waiting for LOD work to stop: " + exception.getMessage());
-        }
-
+        // Drain writes that already reached SQLite. Earlier generation phases observe the
+        // shutdown flag at their next boundary and never enqueue work after the database closes.
         this.lodRepository.shutdown();
         try {
             this.database.close();
         } catch (Exception exception) {
             this.warning("Could not close LOD database cleanly: " + exception.getMessage());
         }
+    }
+
+    public void beginShutdown()
+    {
+        this.shuttingDown.set(true);
+    }
+
+    public boolean isShuttingDown()
+    {
+        return this.shuttingDown.get();
     }
 
     public void setDataDirectory(String dataDirectory)
@@ -375,6 +385,10 @@ public class DhSupport implements Configurable
 
     public CompletableFuture<LodModel> getLod(UUID worldId, SectionPosition position)
     {
+        if (this.isShuttingDown()) {
+            return CompletableFuture.failedFuture(new DhSupportShutdownException());
+        }
+
         SectionGenerationKey key = new SectionGenerationKey(worldId, position.getX(), position.getZ());
         return this.getLodRepository()
             .loadLodAsync(worldId, key.sectionX(), key.sectionZ())
@@ -414,6 +428,10 @@ public class DhSupport implements Configurable
         @Nullable Boolean generateNewChunksOverride
     )
     {
+        if (this.isShuttingDown()) {
+            return CompletableFuture.failedFuture(new DhSupportShutdownException());
+        }
+
         WorldInterface registeredWorld = this.getWorldInterface(key.worldId());
         if (registeredWorld == null) {
             return CompletableFuture.failedFuture(
@@ -575,6 +593,10 @@ public class DhSupport implements Configurable
 
     private void requireCurrentWorld(SectionGenerationKey key, long worldEpoch)
     {
+        if (this.isShuttingDown()) {
+            throw new DhSupportShutdownException();
+        }
+
         if (this.getWorldInterface(key.worldId()) == null || !this.sectionGenerations.isCurrent(key.worldId(), worldEpoch)) {
             throw new WorldGenerationInvalidatedException(key);
         }
@@ -583,7 +605,9 @@ public class DhSupport implements Configurable
     private void logGenerationFailure(SectionGenerationKey key, Throwable error)
     {
         Throwable cause = unwrapCompletionException(error);
-        if (cause instanceof WorldGenerationInvalidatedException) {
+        if (this.isShuttingDown()
+            || cause instanceof WorldGenerationInvalidatedException
+            || cause instanceof DhSupportShutdownException) {
             this.debug(cause.getMessage());
             return;
         }
@@ -612,6 +636,10 @@ public class DhSupport implements Configurable
 
     public void touchLod(UUID worldId, int x, int z, @Nullable String reason)
     {
+        if (this.isShuttingDown()) {
+            return;
+        }
+
         WorldInterface world = this.getWorldInterface(worldId);
         if (world == null) {
             this.warning("Ignoring LOD touch for unregistered world " + worldId + " at " + x + " " + z);
@@ -644,7 +672,7 @@ public class DhSupport implements Configurable
 
     public void updateTouchedLods()
     {
-        if (this.isPaused()) {
+        if (this.isShuttingDown() || this.isPaused()) {
             return;
         }
 
