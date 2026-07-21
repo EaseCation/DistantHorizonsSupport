@@ -490,34 +490,52 @@ public class BukkitWorldInterface implements WorldInterface
             }
         }
 
-        return chunkFuture.thenApply(chunk -> {
+        return chunkFuture.thenCompose(chunk -> {
             if (chunk == null) {
-                return false;
+                return CompletableFuture.completedFuture(false);
             }
 
-            boolean ticketAdded = chunk.addPluginChunkTicket(this.plugin);
-            if (ticketAdded) {
-                this.heldChunkTickets.add(packed);
-            }
+            return this.plugin.getDhSupport().getScheduler().runOnRegionThread(
+                this.world.getUID(), x, z, () -> {
+                    boolean ticketAdded = chunk.addPluginChunkTicket(this.plugin);
+                    if (ticketAdded) {
+                        this.heldChunkTickets.add(packed);
+                    }
 
-            try {
-                this.cacheChunkSnapshot(x, z, chunk.getChunkSnapshot(true, true, false, true));
-                return true;
-            } catch (RuntimeException exception) {
-                if (ticketAdded) {
-                    this.heldChunkTickets.remove(packed);
-                    chunk.removePluginChunkTicket(this.plugin);
+                    try {
+                        this.cacheChunkSnapshot(x, z, chunk.getChunkSnapshot(true, true, false, true));
+                        return true;
+                    } catch (RuntimeException exception) {
+                        if (ticketAdded) {
+                            this.heldChunkTickets.remove(packed);
+                            chunk.removePluginChunkTicket(this.plugin);
+                        }
+                        throw exception;
+                    }
                 }
-                throw exception;
-            }
-        }).whenComplete((ignored, exception) ->
-            this.plugin.getDhSupport().getAsyncSnapshotTracker().complete(this.world.getUID(), chunkX, chunkZ)
-        );
+            );
+        }).whenComplete((ignored, exception) -> {
+            this.plugin.getDhSupport().getAsyncSnapshotTracker().complete(this.world.getUID(), chunkX, chunkZ);
+        });
+    }
+
+    @Override
+    public synchronized boolean hasCompleteChunkSnapshot(int sectionX, int sectionZ)
+    {
+        if (!Objects.equals(this.sectionX, sectionX) || !Objects.equals(this.sectionZ, sectionZ)) {
+            return false;
+        }
+        return Arrays.stream(this.chunks).allMatch(Objects::nonNull);
     }
 
     @Override
     public CompletableFuture<Void> releaseChunkTicketsAsync()
     {
+        if (this.plugin.getServer().getWorld(this.world.getUID()) != this.world) {
+            this.heldChunkTickets.clear();
+            return CompletableFuture.completedFuture(null);
+        }
+
         CompletableFuture<?>[] releases = this.heldChunkTickets.stream()
             .map(packed -> {
                 int chunkX = Coordinates.unpackX(packed);

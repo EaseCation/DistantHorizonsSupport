@@ -68,6 +68,22 @@ public class AsyncLodRepository extends LodRepository
         return this.queueTask(() -> this.saveLod(worldId, sectionX, sectionZ, data, beacons, version));
     }
 
+    public CompletableFuture<LodModel> saveLodAsync(
+        UUID worldId,
+        int sectionX,
+        int sectionZ,
+        byte[] data,
+        byte[] beacons,
+        int version,
+        Runnable beforeSave
+    )
+    {
+        return this.queueTask(() -> {
+            beforeSave.run();
+            return this.saveLod(worldId, sectionX, sectionZ, data, beacons, version);
+        });
+    }
+
     public CompletableFuture<LodModel> loadLodAsync(UUID worldId, int sectionX, int sectionZ)
     {
         return this.queueTask(() -> this.loadLod(worldId, sectionX, sectionZ));

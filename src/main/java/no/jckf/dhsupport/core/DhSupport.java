@@ -46,13 +46,13 @@ import org.bukkit.entity.Player;
 import javax.annotation.Nullable;
 import java.lang.reflect.Constructor;
 import java.lang.reflect.InvocationTargetException;
+import java.time.Duration;
 import java.util.*;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
-import java.util.function.Predicate;
+import java.util.logging.Level;
 import java.util.logging.Logger;
 
 public class DhSupport implements Configurable
@@ -88,7 +88,9 @@ public class DhSupport implements Configurable
 
     protected PluginMessageSender pluginMessageSender;
 
-    protected Map<String, CompletableFuture<Lod>> queuedBuilders = new ConcurrentHashMap<>();
+    protected SectionGenerationRegistry<LodModel> sectionGenerations = new SectionGenerationRegistry<>();
+
+    protected SectionFailureLogLimiter generationFailureLogLimiter = new SectionFailureLogLimiter(Duration.ofSeconds(60));
 
     protected Map<String, LodModel> touchedLods = new ConcurrentHashMap<>();
 
@@ -236,10 +238,14 @@ public class DhSupport implements Configurable
         return this.asyncSnapshotTracker;
     }
 
-    public void setWorldInterface(UUID id, @Nullable WorldInterface worldInterface)
+    public synchronized void setWorldInterface(UUID id, @Nullable WorldInterface worldInterface)
     {
+        this.worldInterfaces.remove(id);
+        this.sectionGenerations.advanceWorldEpoch(id);
+        this.generationFailureLogLimiter.clearWorld(id);
+        this.touchedLods.entrySet().removeIf(entry -> entry.getValue().getWorldId().equals(id));
+
         if (worldInterface == null) {
-            this.worldInterfaces.remove(id);
             return;
         }
 
@@ -367,45 +373,11 @@ public class DhSupport implements Configurable
         return builder;
     }
 
-    public CompletableFuture<Lod> queueBuilder(UUID worldId, SectionPosition position, LodBuilder builder)
-    {
-        String key = LodModel.create()
-            .setWorldId(worldId)
-            .setX(position.getX())
-            .setZ(position.getZ())
-            .toString();
-
-        if (this.queuedBuilders.containsKey(key)) {
-            return this.queuedBuilders.get(key);
-        }
-
-        CompletableFuture<Lod> queued = this.getScheduler().runOnSeparateThread(() -> {
-                this.joinPauseState();
-
-                return builder.generate();
-            })
-            .thenApply((lod) -> {
-                this.queuedBuilders.remove(key);
-
-                return lod;
-            })
-            .exceptionally((exception) -> {
-                exception.printStackTrace();
-
-                this.queuedBuilders.remove(key);
-
-                return null;
-            });
-
-        this.queuedBuilders.put(key, queued);
-
-        return queued;
-    }
-
     public CompletableFuture<LodModel> getLod(UUID worldId, SectionPosition position)
     {
+        SectionGenerationKey key = new SectionGenerationKey(worldId, position.getX(), position.getZ());
         return this.getLodRepository()
-            .loadLodAsync(worldId, position.getX(), position.getZ())
+            .loadLodAsync(worldId, key.sectionX(), key.sectionZ())
             .thenComposeAsync((modelFromDb) -> {
                 // If an LOD was found in the database, return it.
                 if (modelFromDb != null) {
@@ -413,7 +385,7 @@ public class DhSupport implements Configurable
                 }
 
                 // Otherwise generate a new one.
-                return this.generateLod(worldId, position, true);
+                return this.generateLod(key, true, null);
             });
     }
 
@@ -429,25 +401,61 @@ public class DhSupport implements Configurable
         @Nullable Boolean generateNewChunksOverride
     )
     {
-        WorldInterface registeredWorld = this.getWorldInterface(worldId);
+        return this.generateLod(
+            new SectionGenerationKey(worldId, position.getX(), position.getZ()),
+            manageChunks,
+            generateNewChunksOverride
+        );
+    }
+
+    private CompletableFuture<LodModel> generateLod(
+        SectionGenerationKey key,
+        boolean manageChunks,
+        @Nullable Boolean generateNewChunksOverride
+    )
+    {
+        WorldInterface registeredWorld = this.getWorldInterface(key.worldId());
         if (registeredWorld == null) {
             return CompletableFuture.failedFuture(
-                new IllegalStateException("No DH world interface is registered for " + worldId)
+                new IllegalStateException("No DH world interface is registered for " + key.worldId())
             );
         }
-        WorldInterface world = registeredWorld.newInstance();
+
+        long worldEpoch = this.sectionGenerations.currentWorldEpoch(key.worldId());
+        return this.sectionGenerations.coalesce(
+            key,
+            worldEpoch,
+            () -> this.startSectionGeneration(
+                key,
+                worldEpoch,
+                registeredWorld,
+                manageChunks,
+                generateNewChunksOverride
+            )
+        );
+    }
+
+    private CompletableFuture<LodModel> startSectionGeneration(
+        SectionGenerationKey key,
+        long worldEpoch,
+        WorldInterface registeredWorld,
+        boolean manageChunks,
+        @Nullable Boolean generateNewChunksOverride
+    )
+    {
+        WorldInterface snapshotWorld = registeredWorld.newInstance();
 
         boolean generateNewChunks = generateNewChunksOverride != null
             ? generateNewChunksOverride
-            : world.getConfig().getBool(DhsConfig.GENERATE_NEW_CHUNKS, true);
+            : snapshotWorld.getConfig().getBool(DhsConfig.GENERATE_NEW_CHUNKS, true);
 
         List<CompletableFuture<Boolean>> snapshots = new ArrayList<>(16);
         boolean generateSnapshots = manageChunks && generateNewChunks;
 
         // Always request all 16 FULL chunks asynchronously. A chunk that was already loaded by
         // another plugin can otherwise unload between the isLoaded check and snapshot capture.
-        Coordinates.foreachChunkInSection(position.getX(), position.getZ(), (blockX, blockZ) ->
-            snapshots.add(world.loadChunkSnapshotAsync(blockX, blockZ, generateSnapshots))
+        Coordinates.foreachChunkInSection(key.sectionX(), key.sectionZ(), (blockX, blockZ) ->
+            snapshots.add(snapshotWorld.loadChunkSnapshotAsync(blockX, blockZ, generateSnapshots))
         );
 
         CompletableFuture<LodModel> generation = CompletableFuture
@@ -455,63 +463,151 @@ public class DhSupport implements Configurable
             .thenComposeAsync((ignored) -> {
                 boolean loadRejected = snapshots
                     .stream()
-                    .map(loadRequest -> {
-                        try {
-                            return loadRequest.get();
-                        } catch (InterruptedException | ExecutionException exception) {
-                            return false;
-                        }
-                    })
-                    .anyMatch(Predicate.isEqual(false));
+                    .map(CompletableFuture::join)
+                    .anyMatch(loaded -> !loaded);
 
                 if (loadRejected) {
                     // Use dummy chunks instead of real world data.
-                    world.setDummyMode(true);
+                    snapshotWorld.setDummyMode(true);
                 }
 
-                // No LOD was found. Start building a new one.
-                LodBuilder builder = this.getBuilder(world, position);
-                if (builder == null) {
-                    return CompletableFuture.<LodModel>failedFuture(
-                        new IllegalStateException("No LOD builder is available for world " + world.getName())
-                    );
-                }
-                CompletableFuture<Lod> lodFuture = this.queueBuilder(worldId, position, builder);
-
-                // Combine the LOD and beacons and save the result in the database.
-                return lodFuture.thenApply((lod) -> {
-                    Encoder lodEncoder = new Encoder(8192);
-                    lod.encode(lodEncoder);
-
-                    Encoder beaconEncoder = new Encoder(16 + lod.getBeacons().size() * 16);
-                    beaconEncoder.writeCollection(lod.getBeacons());
-
-                    this.generationTracker.ping();
-
-                    return this.lodRepository.saveLodAsync(
-                        worldId,
-                        position.getX(),
-                        position.getZ(),
-                        lodEncoder.toByteArray(),
-                        beaconEncoder.toByteArray(),
-                        LodModel.VERSION
-                    );
-                })
-                .thenCompose((f) -> f); // Unwrap the nested future.
+                this.requireCurrentWorld(key, worldEpoch);
+                SectionGenerationContext context = new SectionGenerationContext(
+                    key,
+                    worldEpoch,
+                    snapshotWorld,
+                    loadRejected
+                );
+                return this.buildAndPersist(context);
             });
 
-        // Retain tickets until the snapshot-only builder and repository write have settled.
-        return generation.handle((model, generationError) ->
-            world.releaseChunkTicketsAsync().handle((ignored, cleanupError) -> {
-                if (generationError != null) {
-                    throw new CompletionException(generationError);
-                }
-                if (cleanupError != null) {
-                    throw new CompletionException(cleanupError);
-                }
+        CompletableFuture<LodModel> withCleanup = this.releaseTicketsAfter(generation, snapshotWorld);
+        withCleanup.whenComplete((model, error) -> {
+            if (error == null) {
+                this.generationFailureLogLimiter.clear(key);
+            } else {
+                this.logGenerationFailure(key, error);
+            }
+        });
+        return withCleanup;
+    }
+
+    private CompletableFuture<LodModel> buildAndPersist(SectionGenerationContext context)
+    {
+        this.requireCurrentWorld(context.key(), context.worldEpoch());
+        LodBuilder builder = this.getBuilder(context.snapshotWorld(), context.newPosition());
+        if (builder == null) {
+            return CompletableFuture.failedFuture(
+                new IllegalStateException("No LOD builder is available for world " + context.snapshotWorld().getName())
+            );
+        }
+
+        return this.getScheduler().runOnSeparateThread(() -> {
+            this.joinPauseState();
+            this.requireCurrentWorld(context.key(), context.worldEpoch());
+            return builder.generate();
+        }).thenCompose(lod -> {
+            this.requireCurrentWorld(context.key(), context.worldEpoch());
+
+            Encoder lodEncoder = new Encoder(8192);
+            lod.encode(lodEncoder);
+
+            Encoder beaconEncoder = new Encoder(16 + lod.getBeacons().size() * 16);
+            beaconEncoder.writeCollection(lod.getBeacons());
+
+            this.generationTracker.ping();
+            return this.lodRepository.saveLodAsync(
+                context.key().worldId(),
+                context.key().sectionX(),
+                context.key().sectionZ(),
+                lodEncoder.toByteArray(),
+                beaconEncoder.toByteArray(),
+                LodModel.VERSION,
+                () -> this.requireCurrentWorld(context.key(), context.worldEpoch())
+            ).thenApply(model -> {
+                this.requireCurrentWorld(context.key(), context.worldEpoch());
                 return model;
-            })
-        ).thenCompose(cleanup -> cleanup);
+            });
+        });
+    }
+
+    private CompletableFuture<LodModel> releaseTicketsAfter(
+        CompletableFuture<LodModel> generation,
+        WorldInterface snapshotWorld
+    )
+    {
+        CompletableFuture<LodModel> settled = new CompletableFuture<>();
+        generation.whenComplete((model, generationError) -> {
+            CompletableFuture<Void> cleanup;
+            try {
+                cleanup = snapshotWorld.releaseChunkTicketsAsync();
+            } catch (Throwable cleanupStartError) {
+                this.completeAfterCleanup(settled, model, generationError, cleanupStartError);
+                return;
+            }
+            cleanup.whenComplete((ignored, cleanupError) ->
+                this.completeAfterCleanup(settled, model, generationError, cleanupError)
+            );
+        });
+        return settled;
+    }
+
+    private void completeAfterCleanup(
+        CompletableFuture<LodModel> settled,
+        @Nullable LodModel model,
+        @Nullable Throwable generationError,
+        @Nullable Throwable cleanupError
+    )
+    {
+        Throwable primary = unwrapCompletionException(generationError);
+        Throwable cleanup = unwrapCompletionException(cleanupError);
+        if (primary != null) {
+            if (cleanup != null) {
+                primary.addSuppressed(cleanup);
+            }
+            settled.completeExceptionally(primary);
+        } else if (cleanup != null) {
+            settled.completeExceptionally(cleanup);
+        } else {
+            settled.complete(model);
+        }
+    }
+
+    private void requireCurrentWorld(SectionGenerationKey key, long worldEpoch)
+    {
+        if (this.getWorldInterface(key.worldId()) == null || !this.sectionGenerations.isCurrent(key.worldId(), worldEpoch)) {
+            throw new WorldGenerationInvalidatedException(key);
+        }
+    }
+
+    private void logGenerationFailure(SectionGenerationKey key, Throwable error)
+    {
+        Throwable cause = unwrapCompletionException(error);
+        if (cause instanceof WorldGenerationInvalidatedException) {
+            this.debug(cause.getMessage());
+            return;
+        }
+
+        SectionFailureLogLimiter.Decision decision = this.generationFailureLogLimiter.recordFailure(key, System.nanoTime());
+        if (!decision.shouldLog()) {
+            return;
+        }
+
+        String suppressed = decision.suppressedSinceLastLog() == 0
+            ? ""
+            : " (suppressed " + decision.suppressedSinceLastLog() + " repeats)";
+        this.getLogger().log(Level.WARNING, "LOD generation failed for " + key + suppressed, cause);
+    }
+
+    @Nullable
+    private static Throwable unwrapCompletionException(@Nullable Throwable error)
+    {
+        Throwable current = error;
+        while ((current instanceof CompletionException || current instanceof java.util.concurrent.ExecutionException)
+            && current.getCause() != null) {
+            current = current.getCause();
+        }
+        return current;
     }
 
     public void touchLod(UUID worldId, int x, int z, @Nullable String reason)
@@ -753,13 +849,11 @@ public class DhSupport implements Configurable
 
     public CompletableFuture<Void> awaitIdle()
     {
-        CompletableFuture<?>[] generationFutures = this.queuedBuilders.values().toArray(CompletableFuture[]::new);
         CompletableFuture<?>[] preGenerationFutures = this.preGenerators.values().stream()
             .map(PreGenerator::getCompletion)
             .toArray(CompletableFuture[]::new);
 
-        CompletableFuture<Void> generations = CompletableFuture.allOf(generationFutures)
-            .handle((ignored, exception) -> null)
+        CompletableFuture<Void> generations = this.sectionGenerations.awaitIdle()
             .thenCompose((ignored) -> CompletableFuture.allOf(preGenerationFutures).handle((value, exception) -> null));
 
         return generations.thenCompose((ignored) -> this.lodRepository.awaitIdle());

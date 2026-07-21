@@ -64,6 +64,9 @@ public interface WorldInterface extends Configurable
      */
     CompletableFuture<Boolean> loadChunkSnapshotAsync(int x, int z, boolean generate);
 
+    /** True only when all 16 snapshots for this LOD section are cached in this instance. */
+    boolean hasCompleteChunkSnapshot(int sectionX, int sectionZ);
+
     /** Releases all chunk tickets retained while building this interface's LOD section. */
     CompletableFuture<Void> releaseChunkTicketsAsync();
 

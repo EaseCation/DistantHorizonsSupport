@@ -62,7 +62,11 @@ public class WorldHandler implements Listener
 
     protected void removeWorldInterface(World world)
     {
+        if (this.plugin.getDhSupport().getWorldInterface(world.getUID()) == null) {
+            return;
+        }
         this.plugin.getDhSupport().setWorldInterface(world.getUID(), null);
+        this.plugin.getLogger().info("Unregistered DH world interface for " + world.getName() + " (" + world.getUID() + ")");
     }
 
     protected void touchLod(Location location, String reason)
