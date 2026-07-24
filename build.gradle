@@ -26,6 +26,9 @@ configurations {
     implementation {
         extendsFrom shade
     }
+    testRuntimeClasspath {
+        extendsFrom compileOnly
+    }
 }
 
 dependencies {

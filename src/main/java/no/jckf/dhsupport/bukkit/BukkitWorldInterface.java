@@ -704,9 +704,13 @@ public class BukkitWorldInterface implements WorldInterface
     @Override
     public String getBlockStateAsStringAt(int x, int y, int z)
     {
+        if (this.isDummyMode()) {
+            return this.getMaterialAt(x, y, z);
+        }
+
         MaterialRecord materialRecord = this.getMaterialRecordAt(x, y, z);
 
-        if (this.isDummyMode() || materialRecord.isMapped()) {
+        if (materialRecord.isMapped()) {
             return materialRecord.toString();
         }
 
