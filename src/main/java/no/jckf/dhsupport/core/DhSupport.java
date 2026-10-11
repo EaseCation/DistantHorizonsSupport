@@ -368,19 +368,12 @@ public class DhSupport implements Configurable
     {
         String builderType = world.getConfig().getString(DhsConfig.BUILDER_TYPE);
 
-        LodBuilder builder;
-
-        try {
-            Class<? extends LodBuilder> builderClass = Class.forName(LodBuilder.class.getPackageName() + "." + builderType).asSubclass(LodBuilder.class);
-
-            Constructor<?> constructor = builderClass.getConstructor(WorldInterface.class, SectionPosition.class);
-
-            builder = (LodBuilder) constructor.newInstance(world, position);
-        } catch (NoSuchMethodException | InstantiationException | IllegalAccessException | InvocationTargetException | ClassNotFoundException exception) {
-            return null;
-        }
-
-        return builder;
+        if (builderType == null) return null;
+        return switch (builderType) {
+            case "FullBuilder" -> new no.jckf.dhsupport.core.lodbuilders.FullBuilder(world, position);
+            case "FastOverworldBuilder" -> new no.jckf.dhsupport.core.lodbuilders.FastOverworldBuilder(world, position);
+            default -> null;
+        };
     }
 
     public CompletableFuture<LodModel> getLod(UUID worldId, SectionPosition position)

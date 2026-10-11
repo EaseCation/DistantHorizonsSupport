@@ -30,8 +30,6 @@ import org.bukkit.*;
 
 import javax.annotation.Nullable;
 import java.io.File;
-import java.lang.reflect.InvocationTargetException;
-import java.lang.reflect.Method;
 import java.util.*;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
@@ -39,10 +37,6 @@ import java.util.logging.Logger;
 
 public class BukkitWorldInterface implements WorldInterface
 {
-    protected static boolean BIOME_KEY_WARNING_SENT = false;
-
-    protected static boolean ASYNC_LOAD_WARNING_SENT = false;
-
     protected DhSupportBukkitPlugin plugin;
 
     protected World world;
@@ -72,15 +66,6 @@ public class BukkitWorldInterface implements WorldInterface
 
     protected UnsafeValues unsafeValues;
 
-    @Nullable
-    protected Method getCoordinateScale;
-
-    @Nullable
-    protected Method getBiomeKey;
-
-    @Nullable
-    protected Method getChunkAtAsync;
-
     protected int lightOffset = 0;
 
     public BukkitWorldInterface(DhSupportBukkitPlugin plugin, World world, Configuration config)
@@ -107,37 +92,6 @@ public class BukkitWorldInterface implements WorldInterface
     public void doUnsafeThings()
     {
         this.unsafeValues = Bukkit.getUnsafe();
-
-        // Does not exist for 1.16.5.
-        try {
-            this.getCoordinateScale = this.world.getClass().getMethod("getCoordinateScale");
-        } catch (NoSuchMethodException e) {
-
-        }
-
-        // Detect if we're running under Paper (or a Paper fork) that has this patch:
-        // https://github.com/PaperMC/Paper/commit/5bf259115c1ce29dd96df5fcf53739c94d39f902
-        try {
-            Class<?> regionAccessor = Class.forName("org.bukkit.RegionAccessor");
-
-            this.getBiomeKey = this.unsafeValues.getClass().getMethod("getBiomeKey", regionAccessor, int.class, int.class, int.class);
-        } catch (ClassNotFoundException | NoSuchMethodException e) {
-            if (!BIOME_KEY_WARNING_SENT) {
-                this.getLogger().warning("Custom biomes are not supported on this server.");
-
-                BIOME_KEY_WARNING_SENT = true;
-            }
-        }
-
-        try {
-            this.getChunkAtAsync = this.world.getClass().getMethod("getChunkAtAsync", int.class, int.class, boolean.class);
-        } catch (NoSuchMethodException exception) {
-            if (!ASYNC_LOAD_WARNING_SENT) {
-                this.getLogger().warning("Async chunk loading is not supported on this server. Performance will suffer.");
-
-                ASYNC_LOAD_WARNING_SENT = true;
-            }
-        }
     }
 
     @Override
@@ -228,17 +182,7 @@ public class BukkitWorldInterface implements WorldInterface
     @Override
     public double getCoordinateScale()
     {
-        if (this.getCoordinateScale == null) {
-            boolean isNether = this.world.getEnvironment().equals(World.Environment.NETHER);
-
-            return isNether ? 8 : 1;
-        }
-
-        try {
-            return (double) this.getCoordinateScale.invoke(this.world);
-        } catch (InvocationTargetException | IllegalAccessException exception) {
-            throw new RuntimeException(exception);
-        }
+        return this.world.getCoordinateScale();
     }
 
     protected boolean useVanillaWorldBorder()
@@ -414,47 +358,17 @@ public class BukkitWorldInterface implements WorldInterface
     @Override
     public CompletableFuture<Boolean> loadChunkAsync(int x, int z)
     {
-        if (this.isDummyMode()) {
-            return CompletableFuture.completedFuture(true);
-        }
-
-        if (this.getChunkAtAsync == null) {
-            return this.plugin.getDhSupport().getScheduler().runOnMainThread(() -> this.loadChunk(x, z));
-        }
-
-        int chunkX = Coordinates.blockToChunk(x);
-        int chunkZ = Coordinates.blockToChunk(z);
-
-        try {
-            CompletableFuture<Chunk> chunkFuture = (CompletableFuture<Chunk>) this.getChunkAtAsync.invoke(this.world, chunkX, chunkZ, false);
-
-            return chunkFuture.thenApply(Objects::nonNull);
-        } catch (InvocationTargetException | IllegalAccessException exception) {
-            throw new RuntimeException(exception);
-        }
+        if (this.isDummyMode()) return CompletableFuture.completedFuture(true);
+        return this.world.getChunkAtAsync(Coordinates.blockToChunk(x), Coordinates.blockToChunk(z), false)
+                .thenApply(Objects::nonNull);
     }
 
     @Override
     public CompletableFuture<Boolean> loadOrGenerateChunkAsync(int x, int z)
     {
-        if (this.isDummyMode()) {
-            return CompletableFuture.completedFuture(true);
-        }
-
-        if (this.getChunkAtAsync == null) {
-            return this.plugin.getDhSupport().getScheduler().runOnMainThread(() -> this.loadOrGenerateChunk(x, z));
-        }
-
-        int chunkX = Coordinates.blockToChunk(x);
-        int chunkZ = Coordinates.blockToChunk(z);
-
-        try {
-            CompletableFuture<Chunk> chunkFuture = (CompletableFuture<Chunk>) this.getChunkAtAsync.invoke(this.world, chunkX, chunkZ, true);
-
-            return chunkFuture.thenApply(Objects::nonNull);
-        } catch (InvocationTargetException | IllegalAccessException exception) {
-            throw new RuntimeException(exception);
-        }
+        if (this.isDummyMode()) return CompletableFuture.completedFuture(true);
+        return this.world.getChunkAtAsync(Coordinates.blockToChunk(x), Coordinates.blockToChunk(z), true)
+                .thenApply(Objects::nonNull);
     }
 
     @Override
@@ -472,22 +386,11 @@ public class BukkitWorldInterface implements WorldInterface
         this.plugin.getDhSupport().getAsyncSnapshotTracker().begin(this.world.getUID(), chunkX, chunkZ, startedAt);
 
         CompletableFuture<Chunk> chunkFuture;
-        if (this.getChunkAtAsync == null) {
-            chunkFuture = this.plugin.getDhSupport().getScheduler().runOnRegionThread(
-                this.world.getUID(), x, z, () -> {
-                    if (!this.world.loadChunk(chunkX, chunkZ, generate)) {
-                        return null;
-                    }
-                    return this.world.getChunkAt(chunkX, chunkZ);
-                }
-            );
-        } else {
-            try {
-                chunkFuture = (CompletableFuture<Chunk>) this.getChunkAtAsync.invoke(this.world, chunkX, chunkZ, generate);
-            } catch (InvocationTargetException | IllegalAccessException exception) {
-                this.plugin.getDhSupport().getAsyncSnapshotTracker().complete(this.world.getUID(), chunkX, chunkZ);
-                return CompletableFuture.failedFuture(exception);
-            }
+        try {
+            chunkFuture = this.world.getChunkAtAsync(chunkX, chunkZ, generate);
+        } catch (RuntimeException exception) {
+            this.plugin.getDhSupport().getAsyncSnapshotTracker().complete(this.world.getUID(), chunkX, chunkZ);
+            return CompletableFuture.failedFuture(exception);
         }
 
         return chunkFuture.thenCompose(chunk -> {
@@ -657,13 +560,8 @@ public class BukkitWorldInterface implements WorldInterface
 
         NamespacedKey key = this.getChunk(x, z).getBiome(Coordinates.blockToChunkRelative(x), y, Coordinates.blockToChunkRelative(z)).getKey();
 
-        // If the server just reports "custom" and we have access to getBiomeKey, try to get the correct biome name.
-        if (key.toString().equals("minecraft:custom") && this.getBiomeKey != null) {
-            try {
-                key = (NamespacedKey) this.getBiomeKey.invoke(this.unsafeValues, this.world, x, y, z);
-            } catch (IllegalAccessException | InvocationTargetException exception) {
-                throw new RuntimeException(exception);
-            }
+        if (key.toString().equals("minecraft:custom")) {
+            key = this.unsafeValues.getBiomeKey(this.world, x, y, z);
         }
 
         return key.toString();
