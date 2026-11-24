@@ -35,3 +35,4 @@ replay_pid*
 # Test server
 /server
 /folia
+!gradle/wrapper/gradle-wrapper.jar
